@@ -18,27 +18,24 @@ type Updater struct {
 	client         *http.Client
 	shoutrrrClient ShoutrrrClient
 	logger         DebugLogger
-	timeNow        func() time.Time
 }
 
-func NewUpdater(db Database, client *http.Client, shoutrrrClient ShoutrrrClient,
-	logger DebugLogger, timeNow func() time.Time) *Updater {
+func NewUpdater(db Database, client *http.Client, shoutrrrClient ShoutrrrClient, logger DebugLogger) *Updater {
 	client = makeLogClient(client, logger)
 	return &Updater{
 		db:             db,
 		client:         client,
 		shoutrrrClient: shoutrrrClient,
 		logger:         logger,
-		timeNow:        timeNow,
 	}
 }
 
-func (u *Updater) Update(ctx context.Context, id uint, ip netip.Addr) (err error) {
+func (u *Updater) Update(ctx context.Context, id uint, ip netip.Addr, now time.Time) (err error) {
 	record, err := u.db.Select(id)
 	if err != nil {
 		return err
 	}
-	record.Time = u.timeNow()
+	record.Time = now
 	record.Status = constants.UPDATING
 	err = u.db.Update(id, record)
 	if err != nil {
@@ -48,8 +45,8 @@ func (u *Updater) Update(ctx context.Context, id uint, ip netip.Addr) (err error
 	newIP, err := record.Provider.Update(ctx, u.client, ip)
 	if err != nil {
 		record.Message = err.Error()
-		if errors.Is(err, settingserrors.ErrBannedAbuse) {
-			lastBan := time.Unix(u.timeNow().Unix(), 0)
+		if errors.Is(err, settingserrors.ErrAbuse) {
+			lastBan := time.Unix(now.Unix(), 0)
 			record.LastBan = &lastBan
 			domainName := record.Provider.BuildDomainName()
 			message := domainName + ": " + record.Message +
@@ -65,10 +62,10 @@ func (u *Updater) Update(ctx context.Context, id uint, ip netip.Addr) (err error
 		return err
 	}
 	record.Status = constants.SUCCESS
-	record.Message = "changed to " + ip.String()
+	record.Message = fmt.Sprintf("changed to %s", ip.String())
 	record.History = append(record.History, models.HistoryEvent{
 		IP:   newIP,
-		Time: u.timeNow(),
+		Time: now,
 	})
 	u.shoutrrrClient.Notify(record.Provider.BuildDomainName() + " " + record.Message)
 	return u.db.Update(id, record) // persists some data if needed (i.e new IP)

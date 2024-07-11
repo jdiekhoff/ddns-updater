@@ -1,18 +1,17 @@
 package health
 
 import (
-	"context"
 	"net/http"
 )
 
-func newHandler(healthcheck func(context.Context) error) http.Handler {
+func newHandler(healthcheck func() error) http.Handler {
 	return &handler{
 		healthcheck: healthcheck,
 	}
 }
 
 type handler struct {
-	healthcheck func(context.Context) error
+	healthcheck func() error
 }
 
 func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -20,7 +19,7 @@ func (h *handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, http.StatusText(http.StatusNotFound), http.StatusNotFound)
 		return
 	}
-	err := h.healthcheck(r.Context())
+	err := h.healthcheck()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

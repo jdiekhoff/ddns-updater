@@ -22,13 +22,13 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client,
 	// by default GET request will return 1000 records.
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return 0, fmt.Errorf("creating http request: %w", err)
+		return 0, fmt.Errorf("%w: %w", errors.ErrBadRequest, err)
 	}
 	setHeaders(request)
 
 	response, err := client.Do(request)
 	if err != nil {
-		return 0, fmt.Errorf("doing http request: %w", err)
+		return 0, err
 	}
 	defer response.Body.Close()
 
@@ -50,14 +50,11 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client,
 	}
 	err = decoder.Decode(&data)
 	if err != nil {
-		return 0, fmt.Errorf("json decoding response body: %w", err)
+		return 0, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	for _, record := range data.Records {
-		if record.Host == "" {
-			record.Host = "@"
-		}
-		if record.Host == p.owner && record.Type == recordType {
+		if record.Host == p.host && record.Type == recordType {
 			return record.RecordID, nil
 		}
 	}

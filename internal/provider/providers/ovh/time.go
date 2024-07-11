@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/qdm12/ddns-updater/internal/provider/errors"
 )
 
 func (p *Provider) getAdjustedUnixTimestamp(ctx context.Context, client *http.Client) (
@@ -48,13 +50,13 @@ func (p *Provider) getOVHTime(ctx context.Context, client *http.Client) (ovhTime
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return ovhTime, fmt.Errorf("creating http request: %w", err)
+		return ovhTime, fmt.Errorf("%w: %w", errors.ErrBadRequest, err)
 	}
 	p.setHeaderCommon(request.Header)
 
 	response, err := client.Do(request)
 	if err != nil {
-		return ovhTime, fmt.Errorf("doing http request: %w", err)
+		return ovhTime, err
 	}
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
@@ -67,7 +69,7 @@ func (p *Provider) getOVHTime(ctx context.Context, client *http.Client) (ovhTime
 	var unixTimestamp int64
 	err = decoder.Decode(&unixTimestamp)
 	if err != nil {
-		return ovhTime, fmt.Errorf("json decoding response body: %w", err)
+		return ovhTime, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	err = response.Body.Close()

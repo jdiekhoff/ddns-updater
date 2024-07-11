@@ -22,21 +22,19 @@ import (
 
 type Provider struct {
 	domain         string
-	owner          string
+	host           string
 	ipVersion      ipversion.IPVersion
-	ipv6Suffix     netip.Prefix
 	key            string
 	token          string
 	email          string
 	userServiceKey string
 	zoneIdentifier string
 	proxied        bool
-	ttl            uint32
+	ttl            uint
 }
 
-func New(data json.RawMessage, domain, owner string,
-	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
-	p *Provider, err error) {
+func New(data json.RawMessage, domain, host string,
+	ipVersion ipversion.IPVersion) (p *Provider, err error) {
 	extraSettings := struct {
 		Key            string `json:"key"`
 		Token          string `json:"token"`
@@ -44,24 +42,16 @@ func New(data json.RawMessage, domain, owner string,
 		UserServiceKey string `json:"user_service_key"`
 		ZoneIdentifier string `json:"zone_identifier"`
 		Proxied        bool   `json:"proxied"`
-		TTL            uint32 `json:"ttl"`
+		TTL            uint   `json:"ttl"`
 	}{}
 	err = json.Unmarshal(data, &extraSettings)
 	if err != nil {
 		return nil, err
 	}
-
-	err = validateSettings(domain, extraSettings.Email, extraSettings.Key, extraSettings.UserServiceKey,
-		extraSettings.ZoneIdentifier, extraSettings.TTL)
-	if err != nil {
-		return nil, fmt.Errorf("validating provider specific settings: %w", err)
-	}
-
-	return &Provider{
+	p = &Provider{
 		domain:         domain,
-		owner:          owner,
+		host:           host,
 		ipVersion:      ipVersion,
-		ipv6Suffix:     ipv6Suffix,
 		key:            extraSettings.Key,
 		token:          extraSettings.Token,
 		email:          extraSettings.Email,
@@ -69,65 +59,57 @@ func New(data json.RawMessage, domain, owner string,
 		zoneIdentifier: extraSettings.ZoneIdentifier,
 		proxied:        extraSettings.Proxied,
 		ttl:            extraSettings.TTL,
-	}, nil
+	}
+	err = p.isValid()
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 var (
 	keyRegex            = regexp.MustCompile(`^[a-zA-Z0-9]+$`)
 	userServiceKeyRegex = regexp.MustCompile(`^v1\.0.+$`)
-	regexEmail          = regexp.MustCompile(`[a-zA-Z0-9-_.+]+@[a-zA-Z0-9-_.]+\.[a-zA-Z]{2,10}`)
 )
 
-func validateSettings(domain, email, key, userServiceKey, zoneIdentifier string, ttl uint32) (err error) {
-	err = utils.CheckDomain(domain)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
-	}
-
+func (p *Provider) isValid() error {
 	switch {
-	case email != "", key != "": // email and key must be provided
+	case p.key != "": // email and key must be provided
 		switch {
-		case !keyRegex.MatchString(key):
-			return fmt.Errorf("%w: key %q does not match regex %q",
-				errors.ErrKeyNotValid, key, keyRegex)
-		case !regexEmail.MatchString(email):
-			return fmt.Errorf("%w: email %q does not match regex %q",
-				errors.ErrEmailNotValid, email, regexEmail)
+		case !keyRegex.MatchString(p.key):
+			return fmt.Errorf("%w", errors.ErrMalformedKey)
+		case !utils.MatchEmail(p.email):
+			return fmt.Errorf("%w", errors.ErrMalformedEmail)
 		}
-	case userServiceKey != "": // only user service key
-		if !userServiceKeyRegex.MatchString(userServiceKey) {
-			return fmt.Errorf("%w: %q does not match regex %q",
-				errors.ErrUserServiceKeyNotValid, userServiceKey, userServiceKeyRegex)
+	case p.userServiceKey != "": // only user service key
+		if !userServiceKeyRegex.MatchString(p.userServiceKey) {
+			return fmt.Errorf("%w", errors.ErrMalformedUserServiceKey)
 		}
 	default: // constants.API token only
 	}
 	switch {
-	case zoneIdentifier == "":
-		return fmt.Errorf("%w", errors.ErrZoneIdentifierNotSet)
-	case ttl == 0:
-		return fmt.Errorf("%w", errors.ErrTTLNotSet)
+	case p.zoneIdentifier == "":
+		return fmt.Errorf("%w", errors.ErrEmptyZoneIdentifier)
+	case p.ttl == 0:
+		return fmt.Errorf("%w", errors.ErrEmptyTTL)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.owner, constants.Cloudflare, p.ipVersion)
+	return utils.ToString(p.domain, p.host, constants.Cloudflare, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Owner() string {
-	return p.owner
+func (p *Provider) Host() string {
+	return p.host
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
-}
-
-func (p *Provider) IPv6Suffix() netip.Prefix {
-	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -135,15 +117,15 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.owner, p.domain)
+	return utils.BuildDomainName(p.host, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
-		Owner:     p.Owner(),
+		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
+		Host:      models.HTML(p.Host()),
 		Provider:  "<a href=\"https://www.cloudflare.com\">Cloudflare</a>",
-		IPVersion: p.ipVersion.String(),
+		IPVersion: models.HTML(p.ipVersion.String()),
 	}
 }
 
@@ -179,14 +161,14 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client, newIP n
 
 	values := url.Values{}
 	values.Set("type", recordType)
-	values.Set("name", utils.BuildURLQueryHostname(p.owner, p.domain))
+	values.Set("name", utils.BuildURLQueryHostname(p.host, p.domain))
 	values.Set("page", "1")
 	values.Set("per_page", "1")
 	u.RawQuery = values.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return "", false, fmt.Errorf("creating http request: %w", err)
+		return "", false, err
 	}
 	p.setHeaders(request)
 
@@ -198,7 +180,7 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client, newIP n
 
 	if response.StatusCode != http.StatusOK {
 		return "", false, fmt.Errorf("%w: %d: %s",
-			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	decoder := json.NewDecoder(response.Body)
@@ -212,27 +194,27 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client, newIP n
 	}{}
 	err = decoder.Decode(&listRecordsResponse)
 	if err != nil {
-		return "", false, fmt.Errorf("json decoding response body: %w", err)
+		return "", false, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	switch {
 	case len(listRecordsResponse.Errors) > 0:
 		return "", false, fmt.Errorf("%w: %s",
-			errors.ErrUnsuccessful, strings.Join(listRecordsResponse.Errors, ","))
+			errors.ErrUnsuccessfulResponse, strings.Join(listRecordsResponse.Errors, ","))
 	case !listRecordsResponse.Success:
-		return "", false, fmt.Errorf("%w", errors.ErrUnsuccessful)
+		return "", false, fmt.Errorf("%w", errors.ErrUnsuccessfulResponse)
 	case len(listRecordsResponse.Result) == 0:
-		return "", false, fmt.Errorf("%w", errors.ErrReceivedNoResult)
+		return "", false, fmt.Errorf("%w", errors.ErrNoResultReceived)
 	case len(listRecordsResponse.Result) > 1:
 		return "", false, fmt.Errorf("%w: %d instead of 1",
-			errors.ErrResultsCountReceived, len(listRecordsResponse.Result))
+			errors.ErrNumberOfResultsReceived, len(listRecordsResponse.Result))
 	case listRecordsResponse.Result[0].Content == newIP.String(): // up to date
 		return "", true, nil
 	}
 	return listRecordsResponse.Result[0].ID, false, nil
 }
 
-func (p *Provider) createRecord(ctx context.Context, client *http.Client, ip netip.Addr) (recordID string, err error) {
+func (p *Provider) CreateRecord(ctx context.Context, client *http.Client, ip netip.Addr) (recordID string, err error) {
 	recordType := constants.A
 
 	if ip.Is6() {
@@ -250,10 +232,10 @@ func (p *Provider) createRecord(ctx context.Context, client *http.Client, ip net
 		Name    string `json:"name"`    // DNS record name i.e. example.com
 		Content string `json:"content"` // ip address
 		Proxied bool   `json:"proxied"` // whether the record is receiving the performance and security benefits of Cloudflare
-		TTL     uint32 `json:"ttl"`
+		TTL     uint   `json:"ttl"`
 	}{
 		Type:    recordType,
-		Name:    utils.BuildURLQueryHostname(p.owner, p.domain),
+		Name:    utils.BuildURLQueryHostname(p.host, p.domain),
 		Content: ip.String(),
 		Proxied: p.proxied,
 		TTL:     p.ttl,
@@ -262,13 +244,14 @@ func (p *Provider) createRecord(ctx context.Context, client *http.Client, ip net
 	buffer := bytes.NewBuffer(nil)
 	encoder := json.NewEncoder(buffer)
 	err = encoder.Encode(requestData)
+
 	if err != nil {
-		return "", fmt.Errorf("JSON encoding request data: %w", err)
+		return "", fmt.Errorf("%w: %w", errors.ErrRequestEncode, err)
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), buffer)
 	if err != nil {
-		return "", fmt.Errorf("creating http request: %w", err)
+		return "", err
 	}
 
 	p.setHeaders(request)
@@ -281,7 +264,7 @@ func (p *Provider) createRecord(ctx context.Context, client *http.Client, ip net
 
 	if response.StatusCode > http.StatusUnsupportedMediaType {
 		return "", fmt.Errorf("%w: %d: %s",
-			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	decoder := json.NewDecoder(response.Body)
@@ -297,7 +280,7 @@ func (p *Provider) createRecord(ctx context.Context, client *http.Client, ip net
 	}
 	err = decoder.Decode(&parsedJSON)
 	if err != nil {
-		return "", fmt.Errorf("json decoding response body: %w", err)
+		return "", fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	if !parsedJSON.Success {
@@ -305,7 +288,7 @@ func (p *Provider) createRecord(ctx context.Context, client *http.Client, ip net
 		for _, e := range parsedJSON.Errors {
 			errStr += fmt.Sprintf("error %d: %s; ", e.Code, e.Message)
 		}
-		return "", fmt.Errorf("%w: %s", errors.ErrUnsuccessful, errStr)
+		return "", fmt.Errorf("%w: %s", errors.ErrUnsuccessfulResponse, errStr)
 	}
 
 	return parsedJSON.Result.ID, nil
@@ -320,13 +303,13 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	identifier, upToDate, err := p.getRecordID(ctx, client, ip)
 
 	switch {
-	case stderrors.Is(err, errors.ErrReceivedNoResult):
-		identifier, err = p.createRecord(ctx, client, ip)
+	case stderrors.Is(err, errors.ErrNoResultReceived):
+		identifier, err = p.CreateRecord(ctx, client, ip)
 		if err != nil {
-			return netip.Addr{}, fmt.Errorf("creating record: %w", err)
+			return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrCreateRecord, err)
 		}
 	case err != nil:
-		return netip.Addr{}, fmt.Errorf("getting record id: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrGetRecordID, err)
 	case upToDate:
 		return ip, nil
 	}
@@ -342,10 +325,10 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 		Name    string `json:"name"`    // DNS record name i.e. example.com
 		Content string `json:"content"` // ip address
 		Proxied bool   `json:"proxied"` // whether the record is receiving the performance and security benefits of Cloudflare
-		TTL     uint32 `json:"ttl"`
+		TTL     uint   `json:"ttl"`
 	}{
 		Type:    recordType,
-		Name:    utils.BuildURLQueryHostname(p.owner, p.domain),
+		Name:    utils.BuildURLQueryHostname(p.host, p.domain),
 		Content: ip.String(),
 		Proxied: p.proxied,
 		TTL:     p.ttl,
@@ -355,12 +338,12 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	encoder := json.NewEncoder(buffer)
 	err = encoder.Encode(requestData)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("json encoding request data: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrRequestEncode, err)
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), buffer)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("creating http request: %w", err)
+		return netip.Addr{}, err
 	}
 
 	p.setHeaders(request)
@@ -373,7 +356,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 
 	if response.StatusCode > http.StatusUnsupportedMediaType {
 		return netip.Addr{}, fmt.Errorf("%w: %d: %s",
-			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	decoder := json.NewDecoder(response.Body)
@@ -389,7 +372,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	}
 	err = decoder.Decode(&parsedJSON)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("json decoding response body: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	if !parsedJSON.Success {
@@ -397,7 +380,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 		for _, e := range parsedJSON.Errors {
 			errStr += fmt.Sprintf("error %d: %s; ", e.Code, e.Message)
 		}
-		return netip.Addr{}, fmt.Errorf("%w: %s", errors.ErrUnsuccessful, errStr)
+		return netip.Addr{}, fmt.Errorf("%w: %s", errors.ErrUnsuccessfulResponse, errStr)
 	}
 
 	newIP, err = netip.ParseAddr(parsedJSON.Result.Content)

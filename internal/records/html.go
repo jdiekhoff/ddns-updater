@@ -22,14 +22,14 @@ func (r *Record) HTML(now time.Time) models.HTMLRow {
 	if r.Status == "" {
 		row.Status = NotAvailable
 	} else {
-		row.Status = fmt.Sprintf("%s %s, %s",
+		row.Status = models.HTML(fmt.Sprintf("%s %s, %s",
 			convertStatus(r.Status),
 			message,
-			time.Since(r.Time).Round(time.Second).String()+" ago")
+			time.Since(r.Time).Round(time.Second).String()+" ago"))
 	}
 	currentIP := r.History.GetCurrentIP()
 	if currentIP.IsValid() {
-		row.CurrentIP = `<a href="https://ipinfo.io/` + currentIP.String() + `">` + currentIP.String() + "</a>"
+		row.CurrentIP = models.HTML(`<a href="https://ipinfo.io/"` + currentIP.String() + `\>` + currentIP.String() + "</a>")
 	} else {
 		row.CurrentIP = NotAvailable
 	}
@@ -45,23 +45,23 @@ func (r *Record) HTML(now time.Time) models.HTMLRow {
 			}
 			previousIPsStr = append(previousIPsStr, previousIP.String())
 		}
-		row.PreviousIPs = strings.Join(previousIPsStr, ", ")
+		row.PreviousIPs = models.HTML(strings.Join(previousIPsStr, ", "))
 	}
 	return row
 }
 
-func convertStatus(status models.Status) string {
+func convertStatus(status models.Status) models.HTML {
 	switch status {
 	case constants.SUCCESS:
-		return `<span class="success">Success</span>`
+		return `<font color="green"><b>Success</b></font>`
 	case constants.FAIL:
-		return `<span class="error">Failure</span>`
+		return `<font color="red"><b>Failure</b></font>`
 	case constants.UPTODATE:
-		return `<span class="uptodate">Up to date</span>`
+		return `<font color="#00CC66"><b>Up to date</b></font>`
 	case constants.UPDATING:
-		return `<span class="updating">Updating</span>`
+		return `<font color="orange"><b>Updating</b></font>`
 	case constants.UNSET:
-		return `<span class="unset">Unset</span>`
+		return `<font color="purple"><b>Unset</b></font>`
 	default:
 		return "Unknown status"
 	}

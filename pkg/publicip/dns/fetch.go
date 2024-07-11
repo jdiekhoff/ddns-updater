@@ -4,14 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"net/netip"
 
 	"github.com/miekg/dns"
 )
 
 var (
-	ErrNetworkNotSupported    = errors.New("network not supported")
 	ErrAnswerNotReceived      = errors.New("response answer not received")
 	ErrAnswerTypeMismatch     = errors.New("answer type is not expected")
 	ErrAnswerTypeNotSupported = errors.New("answer type not supported")
@@ -19,21 +17,8 @@ var (
 	ErrIPMalformed            = errors.New("IP address malformed")
 )
 
-func fetch(ctx context.Context, client Client, network string,
-	providerData providerData) (publicIPs []netip.Addr, err error) {
-	var serverHost string
-	switch network {
-	case "tcp":
-		serverHost = providerData.Address
-	case "tcp4":
-		serverHost = providerData.IPv4.String()
-	case "tcp6":
-		serverHost = providerData.IPv6.String()
-	default:
-		return nil, fmt.Errorf("%w: %s", ErrNetworkNotSupported, network)
-	}
-	serverAddress := net.JoinHostPort(serverHost, "853")
-
+func fetch(ctx context.Context, client Client, providerData providerData) (
+	publicIPs []netip.Addr, err error) {
 	message := &dns.Msg{
 		MsgHdr: dns.MsgHdr{
 			Opcode: dns.OpcodeQuery,
@@ -47,7 +32,7 @@ func fetch(ctx context.Context, client Client, network string,
 		},
 	}
 
-	r, _, err := client.ExchangeContext(ctx, message, serverAddress)
+	r, _, err := client.ExchangeContext(ctx, message, providerData.nameserver)
 	if err != nil {
 		return nil, err
 	}
@@ -117,7 +102,7 @@ func handleAnswerANY(answer dns.RR) (publicIP netip.Addr, err error) {
 		publicIP, err = handleAnswerAAAA(answer)
 	default:
 		return netip.Addr{}, fmt.Errorf("%w: %s",
-			ErrAnswerTypeNotSupported, dns.TypeToString[rrType])
+			ErrAnswerTypeMismatch, dns.TypeToString[rrType])
 	}
 
 	if err != nil {

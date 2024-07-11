@@ -3,28 +3,25 @@ package gcp
 import (
 	"encoding/json"
 	"fmt"
-	"net/netip"
 
 	"github.com/qdm12/ddns-updater/internal/models"
 	"github.com/qdm12/ddns-updater/internal/provider/constants"
-	"github.com/qdm12/ddns-updater/internal/provider/errors"
+	ddnserrors "github.com/qdm12/ddns-updater/internal/provider/errors"
 	"github.com/qdm12/ddns-updater/internal/provider/utils"
 	"github.com/qdm12/ddns-updater/pkg/publicip/ipversion"
 )
 
 type Provider struct {
 	domain      string
-	owner       string
-	ipVersion   ipversion.IPVersion
-	ipv6Suffix  netip.Prefix
+	host        string
 	project     string
 	zone        string
 	credentials json.RawMessage
+	ipVersion   ipversion.IPVersion
 }
 
-func New(data json.RawMessage, domain, owner string,
-	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
-	p *Provider, err error) {
+func New(data json.RawMessage, domain, host string,
+	ipVersion ipversion.IPVersion) (p *Provider, err error) {
 	var extraSettings struct {
 		Project     string          `json:"project"`
 		Zone        string          `json:"zone"`
@@ -36,66 +33,53 @@ func New(data json.RawMessage, domain, owner string,
 		return nil, fmt.Errorf("JSON decoding extra settings: %w", err)
 	}
 
-	err = validateSettings(domain, extraSettings.Project, extraSettings.Zone, extraSettings.Credentials)
-	if err != nil {
-		return nil, fmt.Errorf("validating provider specific settings: %w", err)
-	}
-
-	return &Provider{
+	p = &Provider{
 		domain:      domain,
-		owner:       owner,
+		host:        host,
 		ipVersion:   ipVersion,
-		ipv6Suffix:  ipv6Suffix,
 		project:     extraSettings.Project,
 		zone:        extraSettings.Zone,
 		credentials: extraSettings.Credentials,
-	}, nil
+	}
+
+	err = p.isValid()
+	if err != nil {
+		return nil, fmt.Errorf("configuration is not valid: %w", err)
+	}
+
+	return p, nil
 }
 
-func validateSettings(domain, project, zone string, credentials json.RawMessage) (err error) {
-	err = utils.CheckDomain(domain)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
+func (p *Provider) isValid() error {
+	if p.project == "" {
+		return ddnserrors.ErrGCPProjectNotSet
 	}
 
-	switch {
-	case project == "":
-		return fmt.Errorf("%w", errors.ErrGCPProjectNotSet)
-	case zone == "":
-		return fmt.Errorf("%w", errors.ErrZoneIdentifierNotSet)
-	case len(credentials) == 0:
-		return fmt.Errorf("%w", errors.ErrCredentialsNotSet)
+	if p.zone == "" {
+		return ddnserrors.ErrEmptyZoneIdentifier
 	}
-	var creds struct {
-		Type string `json:"type"`
-	}
-	err = json.Unmarshal(credentials, &creds)
-	if err != nil || creds.Type == "" {
-		return fmt.Errorf("%w: 'type' JSON field value missing",
-			errors.ErrCredentialsNotValid)
+
+	if len(p.credentials) == 0 {
+		return ddnserrors.ErrCredentialsNotSet
 	}
 
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.owner, constants.GCP, p.ipVersion)
+	return utils.ToString(p.domain, p.host, constants.GCP, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Owner() string {
-	return p.owner
+func (p *Provider) Host() string {
+	return p.host
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
-}
-
-func (p *Provider) IPv6Suffix() netip.Prefix {
-	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -103,14 +87,14 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.owner, p.domain)
+	return utils.BuildDomainName(p.host, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
-		Owner:     p.Owner(),
+		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
+		Host:      models.HTML(p.Host()),
 		Provider:  "<a href=\"https://cloud.google.com/\">Google Cloud</a>",
-		IPVersion: p.ipVersion.String(),
+		IPVersion: models.HTML(p.ipVersion.String()),
 	}
 }

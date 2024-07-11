@@ -17,17 +17,15 @@ import (
 
 type Provider struct {
 	domain       string
-	owner        string
+	host         string
 	ipVersion    ipversion.IPVersion
-	ipv6Suffix   netip.Prefix
 	accessKeyID  string
 	accessSecret string
 	region       string
 }
 
-func New(data json.RawMessage, domain, owner string,
-	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
-	p *Provider, err error) {
+func New(data json.RawMessage, domain, host string,
+	ipVersion ipversion.IPVersion) (p *Provider, err error) {
 	extraSettings := struct {
 		AccessKeyID  string `json:"access_key_id"`
 		AccessSecret string `json:"access_secret"`
@@ -37,60 +35,48 @@ func New(data json.RawMessage, domain, owner string,
 	if err != nil {
 		return nil, err
 	}
-	region := "cn-hangzhou"
-	if extraSettings.Region != "" {
-		region = extraSettings.Region
-	}
-
-	err = validateSettings(domain, extraSettings.AccessKeyID, extraSettings.AccessSecret)
-	if err != nil {
-		return nil, fmt.Errorf("validating provider specific settings: %w", err)
-	}
-
-	return &Provider{
+	p = &Provider{
 		domain:       domain,
-		owner:        owner,
+		host:         host,
 		ipVersion:    ipVersion,
-		ipv6Suffix:   ipv6Suffix,
 		accessKeyID:  extraSettings.AccessKeyID,
 		accessSecret: extraSettings.AccessSecret,
-		region:       region,
-	}, nil
+		region:       "cn-hangzhou",
+	}
+	if extraSettings.Region != "" {
+		p.region = extraSettings.Region
+	}
+	err = p.isValid()
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
-func validateSettings(domain, accessKeyID, accessSecret string) (err error) {
-	err = utils.CheckDomain(domain)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
-	}
-
+func (p *Provider) isValid() error {
 	switch {
-	case accessKeyID == "":
-		return fmt.Errorf("%w", errors.ErrAccessKeyIDNotSet)
-	case accessSecret == "":
-		return fmt.Errorf("%w", errors.ErrAccessKeySecretNotSet)
+	case p.accessKeyID == "":
+		return fmt.Errorf("%w", errors.ErrEmptyAccessKeyID)
+	case p.accessSecret == "":
+		return fmt.Errorf("%w", errors.ErrEmptyAccessKeySecret)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.owner, constants.Aliyun, p.ipVersion)
+	return utils.ToString(p.domain, p.host, constants.Aliyun, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Owner() string {
-	return p.owner
+func (p *Provider) Host() string {
+	return p.host
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
-}
-
-func (p *Provider) IPv6Suffix() netip.Prefix {
-	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -98,15 +84,15 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.owner, p.domain)
+	return utils.BuildDomainName(p.host, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
-		Owner:     p.Owner(),
+		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
+		Host:      models.HTML(p.Host()),
 		Provider:  "<a href=\"https://www.aliyun.com/\">Aliyun</a>",
-		IPVersion: p.ipVersion.String(),
+		IPVersion: models.HTML(p.ipVersion.String()),
 	}
 }
 
@@ -121,15 +107,15 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	if stderrors.Is(err, errors.ErrRecordNotFound) {
 		recordID, err = p.createRecord(ctx, client, ip)
 		if err != nil {
-			return newIP, fmt.Errorf("creating record: %w", err)
+			return newIP, fmt.Errorf("%w: %w", errors.ErrCreateRecord, err)
 		}
 	} else if err != nil {
-		return newIP, fmt.Errorf("getting record id: %w", err)
+		return newIP, fmt.Errorf("%w: %w", errors.ErrGetRecordID, err)
 	}
 
 	err = p.updateRecord(ctx, client, recordID, ip)
 	if err != nil {
-		return newIP, fmt.Errorf("updating record: %w", err)
+		return newIP, fmt.Errorf("%w: %w", errors.ErrUpdateRecord, err)
 	}
 
 	return ip, nil

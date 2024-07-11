@@ -11,10 +11,8 @@ type dataModel struct {
 }
 
 type record struct {
-	Domain string `json:"domain"`
-	// Host is kept for retro-compatibility and is replaced by Owner.
-	Host   string                `json:"host,omitempty"`
-	Owner  string                `json:"owner"`
+	Domain string                `json:"domain"`
+	Host   string                `json:"host"`
 	Events []models.HistoryEvent `json:"ips"`
 }
 

@@ -3,12 +3,9 @@ package aliyun
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"net/http"
+	"fmt"
 	"net/url"
-	"strconv"
 	"time"
-
-	"github.com/qdm12/ddns-updater/internal/provider/headers"
 )
 
 func newURLValues(accessKeyID string) (values url.Values) {
@@ -23,11 +20,6 @@ func newURLValues(accessKeyID string) (values url.Values) {
 	values.Set("SignatureMethod", "HMAC-SHA1")
 	values.Set("Timestamp", time.Now().UTC().Format("2006-01-02T15:04:05Z"))
 	values.Set("SignatureVersion", "1.0")
-	values.Set("SignatureNonce", strconv.FormatInt(randInt64, 10))
+	values.Set("SignatureNonce", fmt.Sprint(randInt64))
 	return values
-}
-
-func setHeaders(request *http.Request) {
-	headers.SetUserAgent(request)
-	headers.SetAccept(request, "application/json")
 }

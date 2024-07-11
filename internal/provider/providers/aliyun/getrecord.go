@@ -21,7 +21,7 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client,
 	values := newURLValues(p.accessKeyID)
 	values.Set("Action", "DescribeDomainRecords")
 	values.Set("DomainName", p.domain)
-	values.Set("RRKeyWord", p.owner)
+	values.Set("RRKeyWord", p.host)
 	values.Set("Type", recordType)
 
 	sign(http.MethodGet, values, p.accessSecret)
@@ -30,9 +30,8 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client,
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return "", fmt.Errorf("creating http request: %w", err)
+		return "", fmt.Errorf("%w: %w", errors.ErrBadRequest, err)
 	}
-	setHeaders(request)
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -56,14 +55,14 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client,
 		err = json.Unmarshal(bodyBytes, &data)
 		if err != nil || data.Code != "InvalidDomainName.NoExist" {
 			return "", fmt.Errorf("%w: %d: %s",
-				errors.ErrHTTPStatusNotValid, response.StatusCode,
+				errors.ErrBadHTTPStatus, response.StatusCode,
 				utils.BodyToSingleLine(response.Body))
 		}
 
 		return "", fmt.Errorf("%w", errors.ErrRecordNotFound)
 	default:
 		return "", fmt.Errorf("%w: %d: %s",
-			errors.ErrHTTPStatusNotValid, response.StatusCode,
+			errors.ErrBadHTTPStatus, response.StatusCode,
 			utils.BodyToSingleLine(response.Body))
 	}
 
@@ -77,7 +76,7 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client,
 	}
 	err = decoder.Decode(&data)
 	if err != nil {
-		return "", fmt.Errorf("json decoding response body: %w", err)
+		return "", fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	switch len(data.DomainRecords.Record) {
@@ -86,7 +85,7 @@ func (p *Provider) getRecordID(ctx context.Context, client *http.Client,
 	case 1:
 	default:
 		return "", fmt.Errorf("%w: %d records found instead of 1",
-			errors.ErrResultsCountReceived, len(data.DomainRecords.Record))
+			errors.ErrNumberOfResultsReceived, len(data.DomainRecords.Record))
 	}
 
 	return data.DomainRecords.Record[0].RecordID, nil

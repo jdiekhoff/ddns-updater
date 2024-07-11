@@ -11,7 +11,6 @@ import (
 	"strings"
 
 	"github.com/qdm12/ddns-updater/internal/models"
-	"github.com/qdm12/ddns-updater/internal/provider/constants"
 	"github.com/qdm12/ddns-updater/internal/provider/errors"
 	"github.com/qdm12/ddns-updater/internal/provider/headers"
 	"github.com/qdm12/ddns-updater/internal/provider/utils"
@@ -19,17 +18,15 @@ import (
 )
 
 type Provider struct {
-	domain     string
-	owner      string
-	ipVersion  ipversion.IPVersion
-	ipv6Suffix netip.Prefix
-	username   string
-	password   string
+	domain    string
+	host      string
+	ipVersion ipversion.IPVersion
+	username  string
+	password  string
 }
 
-func New(data json.RawMessage, domain, owner string,
-	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
-	p *Provider, err error) {
+func New(data json.RawMessage, domain, host string,
+	ipVersion ipversion.IPVersion) (p *Provider, err error) {
 	extraSettings := struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -38,55 +35,46 @@ func New(data json.RawMessage, domain, owner string,
 	if err != nil {
 		return nil, fmt.Errorf("decoding inwx extra settings: %w", err)
 	}
-
-	err = validateSettings(domain, extraSettings.Username, extraSettings.Password)
-	if err != nil {
-		return nil, fmt.Errorf("validating provider specific settings: %w", err)
+	p = &Provider{
+		domain:    domain,
+		host:      host,
+		ipVersion: ipVersion,
+		username:  extraSettings.Username,
+		password:  extraSettings.Password,
 	}
-
-	return &Provider{
-		domain:     domain,
-		owner:      owner,
-		ipVersion:  ipVersion,
-		ipv6Suffix: ipv6Suffix,
-		username:   extraSettings.Username,
-		password:   extraSettings.Password,
-	}, nil
+	err = p.isValid()
+	if err != nil {
+		return nil, fmt.Errorf("validating provider settings: %w", err)
+	}
+	return p, nil
 }
 
-func validateSettings(domain, username, password string) (err error) {
-	err = utils.CheckDomain(domain)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
-	}
-
+func (p *Provider) isValid() error {
 	switch {
-	case username == "":
-		return fmt.Errorf("%w", errors.ErrUsernameNotSet)
-	case password == "":
-		return fmt.Errorf("%w", errors.ErrPasswordNotSet)
+	case p.username == "":
+		return fmt.Errorf("%w", errors.ErrEmptyUsername)
+	case p.password == "":
+		return fmt.Errorf("%w", errors.ErrEmptyPassword)
+	case p.host == "*":
+		return fmt.Errorf("%w", errors.ErrHostWildcard)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.owner, constants.INWX, p.ipVersion)
+	return fmt.Sprintf("[domain: %s | host: %s | provider: INWX]", p.domain, p.host)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Owner() string {
-	return p.owner
+func (p *Provider) Host() string {
+	return p.host
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
-}
-
-func (p *Provider) IPv6Suffix() netip.Prefix {
-	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -94,15 +82,15 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.owner, p.domain)
+	return utils.BuildDomainName(p.host, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
-		Owner:     p.Owner(),
+		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
+		Host:      models.HTML(p.Host()),
 		Provider:  "<a href=\"https://inwx.com/\">INWX</a>",
-		IPVersion: p.ipVersion.String(),
+		IPVersion: models.HTML(p.ipVersion.String()),
 	}
 }
 
@@ -114,7 +102,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 		Path:   "/nic/update",
 	}
 	values := url.Values{}
-	values.Set("hostname", utils.BuildURLQueryHostname(p.owner, p.domain))
+	values.Set("hostname", utils.BuildURLQueryHostname(p.host, p.domain))
 	if ip.Is4() {
 		values.Set("myip", ip.String())
 	} else {
@@ -137,15 +125,15 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("reading response body: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 	s := string(b)
 
 	if response.StatusCode != http.StatusOK {
-		return netip.Addr{}, fmt.Errorf("%w: %d: %s", errors.ErrHTTPStatusNotValid, response.StatusCode, s)
+		return netip.Addr{}, fmt.Errorf("%w: %d: %s", errors.ErrBadHTTPStatus, response.StatusCode, s)
 	}
 
-	if !strings.HasPrefix(s, "good") && !strings.HasPrefix(s, "nochg") {
+	if !strings.HasPrefix(s, "good") || !strings.HasPrefix(s, "nochg") {
 		return netip.Addr{}, fmt.Errorf("%w: %s", errors.ErrUnknownResponse, s)
 	}
 

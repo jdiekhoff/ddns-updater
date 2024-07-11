@@ -2,29 +2,25 @@ package shoutrrr
 
 import (
 	"fmt"
-	"net/url"
 	"strings"
 
 	"github.com/containrrr/shoutrrr"
 	"github.com/containrrr/shoutrrr/pkg/router"
+	"github.com/containrrr/shoutrrr/pkg/types"
 )
 
 type Client struct {
 	serviceRouter *router.ServiceRouter
 	serviceNames  []string
-	defaultTitle  string
+	params        types.Params
 	logger        Erroer
 }
 
 func New(settings Settings) (client *Client, err error) {
-	settings.setDefaults()
-	err = settings.validate()
+	settings.SetDefaults()
+	err = settings.Validate()
 	if err != nil {
 		return nil, fmt.Errorf("validating settings: %w", err)
-	}
-
-	for i, address := range settings.Addresses {
-		settings.Addresses[i] = addDefaultTitle(address, settings.DefaultTitle)
 	}
 
 	serviceRouter, err := shoutrrr.CreateSender(settings.Addresses...)
@@ -40,33 +36,16 @@ func New(settings Settings) (client *Client, err error) {
 	return &Client{
 		serviceRouter: serviceRouter,
 		serviceNames:  serviceNames,
-		defaultTitle:  settings.DefaultTitle,
+		params:        settings.Params,
 		logger:        settings.Logger,
 	}, nil
 }
 
 func (c *Client) Notify(message string) {
-	errs := c.serviceRouter.Send(message, nil)
+	errs := c.serviceRouter.Send(message, &c.params)
 	for i, err := range errs {
 		if err != nil {
 			c.logger.Error(c.serviceNames[i] + ": " + err.Error())
 		}
 	}
-}
-
-func addDefaultTitle(address, defaultTitle string) (updatedAddress string) {
-	u, err := url.Parse(address)
-	if err != nil {
-		// address should already be validated
-		panic(fmt.Sprintf("parsing address as url: %s", err))
-	}
-
-	urlValues := u.Query()
-	if urlValues.Has("title") {
-		return address
-	}
-
-	urlValues.Set("title", defaultTitle)
-	u.RawQuery = urlValues.Encode()
-	return u.String()
 }

@@ -14,21 +14,20 @@ import (
 	"github.com/qdm12/ddns-updater/internal/models"
 	"github.com/qdm12/ddns-updater/internal/provider/constants"
 	"github.com/qdm12/ddns-updater/internal/provider/errors"
+	"github.com/qdm12/ddns-updater/internal/provider/headers"
 	"github.com/qdm12/ddns-updater/internal/provider/utils"
 	"github.com/qdm12/ddns-updater/pkg/publicip/ipversion"
 )
 
 type Provider struct {
-	domain     string
-	owner      string
-	ipVersion  ipversion.IPVersion
-	ipv6Suffix netip.Prefix
-	key        string
+	domain    string
+	host      string
+	ipVersion ipversion.IPVersion
+	key       string
 }
 
-func New(data json.RawMessage, domain, owner string,
-	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
-	p *Provider, err error) {
+func New(data json.RawMessage, domain, host string,
+	ipVersion ipversion.IPVersion) (p *Provider, err error) {
 	extraSettings := struct {
 		Key string `json:"key"`
 	}{}
@@ -36,57 +35,45 @@ func New(data json.RawMessage, domain, owner string,
 	if err != nil {
 		return nil, err
 	}
-	if owner == "" { // TODO-v2 remove default
-		owner = "@" // default
+	if host == "" { // TODO-v2 remove default
+		host = "@" // default
 	}
-
-	err = validateSettings(domain, extraSettings.Key)
+	p = &Provider{
+		domain:    domain,
+		host:      host,
+		ipVersion: ipVersion,
+		key:       extraSettings.Key,
+	}
+	err = p.isValid()
 	if err != nil {
-		return nil, fmt.Errorf("validating provider specific settings: %w", err)
+		return nil, err
 	}
-
-	return &Provider{
-		domain:     domain,
-		owner:      owner,
-		ipVersion:  ipVersion,
-		ipv6Suffix: ipv6Suffix,
-		key:        extraSettings.Key,
-	}, nil
+	return p, nil
 }
 
 var keyRegex = regexp.MustCompile(`^[a-zA-Z0-9]{16}$`)
 
-func validateSettings(domain, key string) (err error) {
-	err = utils.CheckDomain(domain)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
-	}
-
-	if !keyRegex.MatchString(key) {
-		return fmt.Errorf("%w: key %q does not match regex %s",
-			errors.ErrKeyNotValid, key, keyRegex)
+func (p *Provider) isValid() error {
+	if !keyRegex.MatchString(p.key) {
+		return fmt.Errorf("%w: %s", errors.ErrMalformedKey, p.key)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.owner, constants.Dreamhost, p.ipVersion)
+	return utils.ToString(p.domain, p.host, constants.Dreamhost, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Owner() string {
-	return p.owner
+func (p *Provider) Host() string {
+	return p.host
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
-}
-
-func (p *Provider) IPv6Suffix() netip.Prefix {
-	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -94,15 +81,15 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.owner, p.domain)
+	return utils.BuildDomainName(p.host, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
-		Owner:     p.Owner(),
+		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
+		Host:      models.HTML(p.Host()),
 		Provider:  "<a href=\"https://www.dreamhost.com/\">Dreamhost</a>",
-		IPVersion: p.ipVersion.String(),
+		IPVersion: models.HTML(p.ipVersion.String()),
 	}
 }
 
@@ -114,12 +101,12 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 
 	records, err := p.getRecords(ctx, client)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("listing records: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrListRecords, err)
 	}
 
 	var oldIP netip.Addr
 	for _, data := range records.Data {
-		if data.Type == recordType && data.Record == utils.BuildURLQueryHostname(p.owner, p.domain) {
+		if data.Type == recordType && data.Record == utils.BuildURLQueryHostname(p.host, p.domain) {
 			if data.Editable == "0" {
 				return netip.Addr{}, fmt.Errorf("%w", errors.ErrRecordNotEditable)
 			}
@@ -134,13 +121,13 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	// Create the record with the new IP before removing the old one if it exists.
 	err = p.createRecord(ctx, client, ip)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("creating record: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrCreateRecord, err)
 	}
 
 	if oldIP.IsValid() { // Found editable record with a different IP address, so remove it
 		err = p.removeRecord(ctx, client, oldIP)
 		if err != nil {
-			return netip.Addr{}, fmt.Errorf("removing record: %w", err)
+			return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrRemoveRecord, err)
 		}
 	}
 
@@ -189,9 +176,9 @@ func (p *Provider) getRecords(ctx context.Context, client *http.Client) (
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return records, fmt.Errorf("creating http request: %w", err)
+		return records, err
 	}
-	setHeaders(request)
+	headers.SetUserAgent(request)
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -201,17 +188,17 @@ func (p *Provider) getRecords(ctx context.Context, client *http.Client) (
 
 	if response.StatusCode != http.StatusOK {
 		return records, fmt.Errorf("%w: %d: %s",
-			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	decoder := json.NewDecoder(response.Body)
 	err = decoder.Decode(&records)
 	if err != nil {
-		return records, fmt.Errorf("json decoding response body: %w", err)
+		return records, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	if records.Result != constants.Success {
-		return records, fmt.Errorf("%w: %s", errors.ErrUnsuccessful, records.Result)
+		return records, fmt.Errorf("%w: %s", errors.ErrUnsuccessfulResponse, records.Result)
 	}
 	return records, nil
 }
@@ -228,16 +215,16 @@ func (p *Provider) removeRecord(ctx context.Context, client *http.Client, ip net
 	}
 	values := p.defaultURLValues()
 	values.Set("cmd", "dns-remove_record")
-	values.Set("record", utils.BuildURLQueryHostname(p.owner, p.domain))
+	values.Set("record", utils.BuildURLQueryHostname(p.host, p.domain))
 	values.Set("type", recordType)
 	values.Set("value", ip.String())
 	u.RawQuery = values.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return fmt.Errorf("creating http request: %w", err)
+		return err
 	}
-	setHeaders(request)
+	headers.SetUserAgent(request)
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -247,19 +234,19 @@ func (p *Provider) removeRecord(ctx context.Context, client *http.Client, ip net
 
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("%w: %d: %s",
-			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	var dhResponse dreamhostReponse
 	decoder := json.NewDecoder(response.Body)
 	err = decoder.Decode(&dhResponse)
 	if err != nil {
-		return fmt.Errorf("json decoding response body: %w", err)
+		return fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	if dhResponse.Result != constants.Success { // this should not happen
 		return fmt.Errorf("%w: %s - %s",
-			errors.ErrUnsuccessful, dhResponse.Result, dhResponse.Data)
+			errors.ErrUnsuccessfulResponse, dhResponse.Result, dhResponse.Data)
 	}
 	return nil
 }
@@ -276,16 +263,16 @@ func (p *Provider) createRecord(ctx context.Context, client *http.Client, ip net
 	}
 	values := p.defaultURLValues()
 	values.Set("cmd", "dns-add_record")
-	values.Set("record", utils.BuildURLQueryHostname(p.owner, p.domain))
+	values.Set("record", utils.BuildURLQueryHostname(p.host, p.domain))
 	values.Set("type", recordType)
 	values.Set("value", ip.String())
 	u.RawQuery = values.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return fmt.Errorf("creating http request: %w", err)
+		return err
 	}
-	setHeaders(request)
+	headers.SetUserAgent(request)
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -295,19 +282,19 @@ func (p *Provider) createRecord(ctx context.Context, client *http.Client, ip net
 
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("%w: %d: %s",
-			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	var dhResponse dreamhostReponse
 	decoder := json.NewDecoder(response.Body)
 	err = decoder.Decode(&dhResponse)
 	if err != nil {
-		return fmt.Errorf("json decoding response body: %w", err)
+		return fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	if dhResponse.Result != constants.Success {
 		return fmt.Errorf("%w: %s - %s",
-			errors.ErrUnsuccessful, dhResponse.Result, dhResponse.Data)
+			errors.ErrUnsuccessfulResponse, dhResponse.Result, dhResponse.Data)
 	}
 	return nil
 }

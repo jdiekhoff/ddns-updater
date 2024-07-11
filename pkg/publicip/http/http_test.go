@@ -29,11 +29,11 @@ func Test_New(t *testing.T) {
 				},
 				ip4: &urlsRing{
 					banned: map[int]string{},
-					urls:   []string{"https://api.ipify.org"},
+					urls:   []string{"http://ip1.dynupdate.no-ip.com"},
 				},
 				ip6: &urlsRing{
 					banned: map[int]string{},
-					urls:   []string{"https://api6.ipify.org"},
+					urls:   []string{"http://ip1.dynupdate6.no-ip.com"},
 				},
 			},
 		},
@@ -66,7 +66,7 @@ func Test_New(t *testing.T) {
 				SetProvidersIP(Provider("invalid")),
 			},
 			err:        ErrUnknownProvider,
-			errMessage: "unknown public IP echo HTTP provider: invalid",
+			errMessage: "unknown provider: invalid",
 		},
 	}
 

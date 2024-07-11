@@ -3,7 +3,6 @@ package dns
 import (
 	"context"
 	"errors"
-	"net"
 	"net/netip"
 	"testing"
 	"time"
@@ -19,10 +18,10 @@ func Test_fetch(t *testing.T) {
 	t.Parallel()
 
 	providerData := providerData{
-		TLSName: "nameserver",
-		fqdn:    "record",
-		class:   dns.ClassNONE,
-		qType:   dns.Type(dns.TypeTXT),
+		nameserver: "nameserver",
+		fqdn:       "record",
+		class:      dns.ClassNONE,
+		qType:      dns.Type(dns.TypeTXT),
 	}
 
 	expectedMessage := &dns.Msg{
@@ -102,13 +101,11 @@ func Test_fetch(t *testing.T) {
 			ctx := context.Background()
 
 			client := mock_dns.NewMockClient(ctrl)
-			expectedAddress := net.JoinHostPort(providerData.Address, "853")
 			client.EXPECT().
-				ExchangeContext(ctx, expectedMessage, expectedAddress).
+				ExchangeContext(ctx, expectedMessage, providerData.nameserver).
 				Return(testCase.response, time.Millisecond, testCase.exchangeErr)
 
-			const network = "tcp" // so it picks the Address field as the address
-			publicIPs, err := fetch(ctx, client, network, providerData)
+			publicIPs, err := fetch(ctx, client, providerData)
 
 			if testCase.err != nil {
 				require.Error(t, err)

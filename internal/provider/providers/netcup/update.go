@@ -1,12 +1,12 @@
 package netcup
 
 import (
-	"context"
 	"fmt"
 	"net/http"
 	"net/netip"
 
 	"github.com/qdm12/ddns-updater/internal/provider/constants"
+	"golang.org/x/net/context"
 )
 
 func (p *Provider) getRecordToUpdate(ctx context.Context,
@@ -23,14 +23,14 @@ func (p *Provider) getRecordToUpdate(ctx context.Context,
 	}
 
 	for _, record = range recordSet.DNSRecords {
-		if record.Hostname == p.owner && record.Type == recordType {
+		if record.Hostname == p.host && record.Type == recordType {
 			record.Destination = ip.String()
 			return record, nil
 		}
 	}
 
 	return dnsRecord{
-		Hostname:    p.owner,
+		Hostname:    p.host,
 		Type:        recordType,
 		Destination: ip.String(),
 	}, nil

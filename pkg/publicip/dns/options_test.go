@@ -31,18 +31,18 @@ func Test_SetProviders(t *testing.T) {
 			initialSettings: settings{
 				providers: []Provider{Cloudflare},
 			},
-			providers: []Provider{OpenDNS},
+			providers: []Provider{Google},
 			expectedSettings: settings{
-				providers: []Provider{OpenDNS},
+				providers: []Provider{Google},
 			},
 		},
-		"OpenDNS and Cloudflare": {
+		"Google and Cloudflare": {
 			initialSettings: settings{
 				providers: []Provider{Cloudflare},
 			},
-			providers: []Provider{OpenDNS, Cloudflare},
+			providers: []Provider{Google, Cloudflare},
 			expectedSettings: settings{
-				providers: []Provider{Cloudflare, OpenDNS},
+				providers: []Provider{Cloudflare, Google},
 			},
 		},
 		"invalid provider": {
@@ -53,7 +53,7 @@ func Test_SetProviders(t *testing.T) {
 			expectedSettings: settings{
 				providers: []Provider{Cloudflare},
 			},
-			err: errors.New("unknown public IP echo DNS provider: invalid"),
+			err: errors.New("unknown provider: invalid"),
 		},
 	}
 

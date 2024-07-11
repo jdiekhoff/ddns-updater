@@ -20,17 +20,15 @@ import (
 
 type Provider struct {
 	domain        string
-	owner         string
+	host          string
 	ipVersion     ipversion.IPVersion
-	ipv6Suffix    netip.Prefix
 	username      string
 	password      string
 	useProviderIP bool
 }
 
-func New(data json.RawMessage, domain, owner string,
-	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
-	p *Provider, err error) {
+func New(data json.RawMessage, domain, host string,
+	ipVersion ipversion.IPVersion) (p *Provider, err error) {
 	extraSettings := struct {
 		Username      string `json:"username"`
 		Password      string `json:"password"`
@@ -40,58 +38,47 @@ func New(data json.RawMessage, domain, owner string,
 	if err != nil {
 		return nil, err
 	}
-
-	err = validateSettings(domain, owner, extraSettings.Username, extraSettings.Password)
-	if err != nil {
-		return nil, fmt.Errorf("validating provider specific settings: %w", err)
-	}
-
-	return &Provider{
+	p = &Provider{
 		domain:        domain,
-		owner:         owner,
+		host:          host,
 		ipVersion:     ipVersion,
-		ipv6Suffix:    ipv6Suffix,
 		username:      extraSettings.Username,
 		password:      extraSettings.Password,
 		useProviderIP: extraSettings.UseProviderIP,
-	}, nil
+	}
+	err = p.isValid()
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
-func validateSettings(domain, owner, username, password string) (err error) {
-	err = utils.CheckDomain(domain)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
-	}
-
+func (p *Provider) isValid() error {
 	switch {
-	case owner == "*":
-		return fmt.Errorf("%w", errors.ErrOwnerWildcard)
-	case username == "":
-		return fmt.Errorf("%w", errors.ErrUsernameNotSet)
-	case password == "":
-		return fmt.Errorf("%w", errors.ErrPasswordNotSet)
+	case p.username == "":
+		return fmt.Errorf("%w", errors.ErrEmptyUsername)
+	case p.password == "":
+		return fmt.Errorf("%w", errors.ErrEmptyPassword)
+	case p.host == "*":
+		return fmt.Errorf("%w", errors.ErrHostWildcard)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.owner, constants.Infomaniak, p.ipVersion)
+	return utils.ToString(p.domain, p.host, constants.Infomaniak, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Owner() string {
-	return p.owner
+func (p *Provider) Host() string {
+	return p.host
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
-}
-
-func (p *Provider) IPv6Suffix() netip.Prefix {
-	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -99,15 +86,15 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.owner, p.domain)
+	return utils.BuildDomainName(p.host, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
-		Owner:     p.Owner(),
+		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
+		Host:      models.HTML(p.Host()),
 		Provider:  "<a href=\"https://www.infomaniak.com/\">Infomaniak</a>",
-		IPVersion: p.ipVersion.String(),
+		IPVersion: models.HTML(p.ipVersion.String()),
 	}
 }
 
@@ -119,58 +106,54 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 		User:   url.UserPassword(p.username, p.password),
 	}
 	values := url.Values{}
-	values.Set("hostname", utils.BuildURLQueryHostname(p.owner, p.domain))
-	useProviderIP := p.useProviderIP && (ip.Is4() || !p.ipv6Suffix.IsValid())
-	if !useProviderIP {
+	values.Set("hostname", utils.BuildURLQueryHostname(p.host, p.domain))
+	if !p.useProviderIP {
 		values.Set("myip", ip.String())
 	}
 	u.RawQuery = values.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("creating http request: %w", err)
+		return netip.Addr{}, err
 	}
 	headers.SetUserAgent(request)
 
 	response, err := client.Do(request)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("doing http request: %w", err)
+		return netip.Addr{}, err
 	}
 	defer response.Body.Close()
 
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("reading response body: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 	s := string(b)
 
 	switch response.StatusCode {
 	case http.StatusOK:
-		prefixFound := ""
-		for _, prefix := range []string{
-			"successfully_changed", "no_change",
-			"good", "nochg", // old prefixes
-		} {
-			if strings.HasPrefix(s, prefix) {
-				prefixFound = prefix
-				break
+		switch {
+		case strings.HasPrefix(s, "good "):
+			newIP, err = netip.ParseAddr(s[5:])
+			if err != nil {
+				return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrIPReceivedMalformed, err)
+			} else if !p.useProviderIP && ip.Compare(newIP) != 0 {
+				return netip.Addr{}, fmt.Errorf("%w: sent ip %s to update but received %s",
+					errors.ErrIPReceivedMismatch, ip, newIP)
 			}
-		}
-
-		if prefixFound == "" {
+			return newIP, nil
+		case strings.HasPrefix(s, "nochg "):
+			newIP, err = netip.ParseAddr(s[6:])
+			if err != nil {
+				return netip.Addr{}, fmt.Errorf("%w: in response %q", errors.ErrNoResultReceived, s)
+			} else if !p.useProviderIP && ip.Compare(newIP) != 0 {
+				return netip.Addr{}, fmt.Errorf("%w: sent ip %s to update but received %s",
+					errors.ErrIPReceivedMismatch, ip, newIP)
+			}
+			return newIP, nil
+		default:
 			return netip.Addr{}, fmt.Errorf("%w: %s", errors.ErrUnknownResponse, s)
 		}
-
-		ipString := strings.TrimPrefix(s, prefixFound+" ")
-		newIP, err = netip.ParseAddr(ipString)
-		if err != nil {
-			return netip.Addr{}, fmt.Errorf("%w: for response %q: %w",
-				errors.ErrIPReceivedMalformed, ipString, err)
-		} else if !useProviderIP && ip.Compare(newIP) != 0 {
-			return netip.Addr{}, fmt.Errorf("%w: sent ip %s to update but received %s",
-				errors.ErrIPReceivedMismatch, ip, newIP)
-		}
-		return newIP, nil
 	case http.StatusBadRequest:
 		switch s {
 		case constants.Nohost:
@@ -178,9 +161,9 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 		case constants.Badauth:
 			return netip.Addr{}, fmt.Errorf("%w", errors.ErrAuth)
 		default:
-			return netip.Addr{}, fmt.Errorf("%w: %d: %s", errors.ErrHTTPStatusNotValid, response.StatusCode, s)
+			return netip.Addr{}, fmt.Errorf("%w: %d: %s", errors.ErrBadHTTPStatus, response.StatusCode, s)
 		}
 	default:
-		return netip.Addr{}, fmt.Errorf("%w: %d: %s", errors.ErrHTTPStatusNotValid, response.StatusCode, s)
+		return netip.Addr{}, fmt.Errorf("%w: %d: %s", errors.ErrBadHTTPStatus, response.StatusCode, s)
 	}
 }

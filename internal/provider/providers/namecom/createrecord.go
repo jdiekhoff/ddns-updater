@@ -10,7 +10,7 @@ import (
 	"net/url"
 
 	"github.com/qdm12/ddns-updater/internal/provider/constants"
-	"github.com/qdm12/ddns-updater/internal/provider/headers"
+	"github.com/qdm12/ddns-updater/internal/provider/errors"
 )
 
 func (p *Provider) createRecord(ctx context.Context, client *http.Client,
@@ -33,7 +33,7 @@ func (p *Provider) createRecord(ctx context.Context, client *http.Client,
 		Answer string  `json:"answer"`
 		TTL    *uint32 `json:"ttl,omitempty"`
 	}{
-		Host:   p.owner,
+		Host:   p.host,
 		Type:   recordType,
 		Answer: ip.String(),
 		TTL:    p.ttl,
@@ -41,15 +41,14 @@ func (p *Provider) createRecord(ctx context.Context, client *http.Client,
 
 	bodyBytes, err := json.Marshal(postRecordsParams)
 	if err != nil {
-		return fmt.Errorf("json encoding request data: %w", err)
+		return fmt.Errorf("%w: %w", errors.ErrRequestMarshal, err)
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewBuffer(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("creating http request: %w", err)
+		return fmt.Errorf("%w: %w", errors.ErrBadRequest, err)
 	}
 	setHeaders(request)
-	headers.SetContentType(request, "application/json")
 
 	response, err := client.Do(request)
 	if err != nil {

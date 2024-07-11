@@ -9,8 +9,6 @@ import (
 	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/qdm12/ddns-updater/internal/models"
 )
 
 type Database struct {
@@ -64,14 +62,6 @@ func NewDatabase(dataDir string) (*Database, error) {
 		return nil, fmt.Errorf("closing database file: %w", err)
 	}
 
-	// Migration from older database using "host" instead of "owner".
-	for i := range data.Records {
-		if data.Records[i].Owner == "" {
-			data.Records[i].Owner = data.Records[i].Host
-			data.Records[i].Host = ""
-		}
-	}
-
 	err = checkData(data)
 	if err != nil {
 		return nil, fmt.Errorf("%s validation error: %w", filePath, err)
@@ -85,50 +75,35 @@ func NewDatabase(dataDir string) (*Database, error) {
 
 var (
 	ErrDomainEmpty         = errors.New("domain is empty")
-	ErrOwnerNotSet         = errors.New("owner is not set")
+	ErrHostIsEmpty         = errors.New("host is empty")
 	ErrIPRecordsMisordered = errors.New("IP records are not ordered correctly by time")
 	ErrIPEmpty             = errors.New("IP is empty")
 	ErrIPTimeEmpty         = errors.New("time of IP is empty")
 )
 
-func checkData(data dataModel) (err error) {
-	for i, record := range data.Records {
+func checkData(data dataModel) error {
+	for _, record := range data.Records {
 		switch {
 		case record.Domain == "":
-			return fmt.Errorf("%w: for record %d of %d", ErrDomainEmpty,
-				i+1, len(data.Records))
-		case record.Owner == "":
-			return fmt.Errorf("%w: for record %d of %d with domain %s",
-				ErrOwnerNotSet, i+1, len(data.Records), record.Domain)
+			return fmt.Errorf("%w: for record %s", ErrDomainEmpty, record)
+		case record.Host == "":
+			return fmt.Errorf("%w: for record %s", ErrHostIsEmpty, record)
 		}
-
-		err = checkHistoryEvents(record.Events)
-		if err != nil {
-			return fmt.Errorf("for record %d of %d with domain %s and owner %s: "+
-				"history events: %w", i+1, len(data.Records),
-				record.Domain, record.Owner, err)
+		var t time.Time
+		for i, event := range record.Events {
+			if event.Time.Before(t) {
+				return fmt.Errorf("%w", ErrIPRecordsMisordered)
+			}
+			t = event.Time
+			switch {
+			case !event.IP.IsValid():
+				return fmt.Errorf("%w: IP %d of %d for record %s",
+					ErrIPEmpty, i+1, len(record.Events), record)
+			case event.Time.IsZero():
+				return fmt.Errorf("%w: IP %d of %d for record %s",
+					ErrIPTimeEmpty, i+1, len(record.Events), record)
+			}
 		}
-	}
-	return nil
-}
-
-func checkHistoryEvents(events []models.HistoryEvent) (err error) {
-	var previousEventTime time.Time
-	for i, event := range events {
-		switch {
-		case event.Time.IsZero():
-			return fmt.Errorf("%w: for event %d of %d (IP %s)",
-				ErrIPTimeEmpty, i+1, len(events), event.IP)
-		case event.Time.Before(previousEventTime):
-			return fmt.Errorf("%w: event %d of %d (IP %s and time %s) "+
-				" is before event %d of %d (IP %s and time %s)",
-				ErrIPRecordsMisordered, i+1, len(events), event.IP, event.Time,
-				i, len(events), events[i-1].IP, events[i-1].Time)
-		case !event.IP.IsValid():
-			return fmt.Errorf("%w: for event %d of %d",
-				ErrIPEmpty, i+1, len(events))
-		}
-		previousEventTime = event.Time
 	}
 	return nil
 }

@@ -15,18 +15,16 @@ import (
 )
 
 type Provider struct {
-	domain         string
-	owner          string
-	ipVersion      ipversion.IPVersion
-	ipv6Suffix     netip.Prefix
 	customerNumber string
+	domain         string
+	host           string
+	ipVersion      ipversion.IPVersion
 	apiKey         string
 	password       string
 }
 
-func New(data json.RawMessage, domain, owner string,
-	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
-	p *Provider, err error) {
+func New(data json.RawMessage, domain, host string,
+	ipVersion ipversion.IPVersion) (p *Provider, err error) {
 	var extraSettings struct {
 		CustomerNumber string `json:"customer_number"`
 		APIKey         string `json:"api_key"`
@@ -37,60 +35,51 @@ func New(data json.RawMessage, domain, owner string,
 		return nil, fmt.Errorf("JSON decoding provider specific settings: %w", err)
 	}
 
-	err = validateSettings(domain, owner, extraSettings.CustomerNumber,
-		extraSettings.APIKey, extraSettings.Password)
-	if err != nil {
-		return nil, fmt.Errorf("validating provider specific settings: %w", err)
-	}
-
-	return &Provider{
+	p = &Provider{
 		domain:         domain,
-		owner:          owner,
+		host:           host,
 		ipVersion:      ipVersion,
-		ipv6Suffix:     ipv6Suffix,
 		customerNumber: extraSettings.CustomerNumber,
 		apiKey:         extraSettings.APIKey,
 		password:       extraSettings.Password,
-	}, nil
-}
-
-func validateSettings(domain, owner, customerNumber, apiKey, password string) (err error) {
-	err = utils.CheckDomain(domain)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
 	}
 
+	err = p.isValid()
+	if err != nil {
+		return nil, fmt.Errorf("validating provider settings: %w", err)
+	}
+
+	return p, nil
+}
+
+func (p *Provider) isValid() error {
 	switch {
-	case owner == "*":
-		return fmt.Errorf("%w", errors.ErrOwnerWildcard)
-	case customerNumber == "":
-		return fmt.Errorf("%w", errors.ErrCustomerNumberNotSet)
-	case apiKey == "":
-		return fmt.Errorf("%w", errors.ErrAPIKeyNotSet)
-	case password == "":
-		return fmt.Errorf("%w", errors.ErrPasswordNotSet)
+	case p.customerNumber == "":
+		return fmt.Errorf("%w", errors.ErrEmptyCustomerNumber)
+	case p.apiKey == "":
+		return fmt.Errorf("%w", errors.ErrEmptyAPIKey)
+	case p.password == "":
+		return fmt.Errorf("%w", errors.ErrEmptyPassword)
+	case p.host == "*":
+		return fmt.Errorf("%w", errors.ErrHostWildcard)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.owner, constants.Netcup, p.ipVersion)
+	return utils.ToString(p.domain, p.host, constants.Netcup, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Owner() string {
-	return p.owner
+func (p *Provider) Host() string {
+	return p.host
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
-}
-
-func (p *Provider) IPv6Suffix() netip.Prefix {
-	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -98,15 +87,15 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.owner, p.domain)
+	return utils.BuildDomainName(p.host, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
-		Owner:     p.Owner(),
+		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
+		Host:      models.HTML(p.Host()),
 		Provider:  "<a href=\"https://www.netcup.eu/\">Netcup.eu</a>",
-		IPVersion: p.ipVersion.String(),
+		IPVersion: models.HTML(p.ipVersion.String()),
 	}
 }
 
@@ -131,12 +120,12 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	}
 	updateResponse, err := p.updateDNSRecords(ctx, client, session, updateRecordSet)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("updating record: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUpdateRecord, err)
 	}
 
 	found := false
 	for _, record = range updateResponse.DNSRecords {
-		if record.Hostname == p.owner && record.Type == recordType {
+		if record.Hostname == p.host && record.Type == recordType {
 			found = true
 			break
 		}

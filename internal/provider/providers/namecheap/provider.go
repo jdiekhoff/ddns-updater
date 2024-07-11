@@ -21,13 +21,17 @@ import (
 
 type Provider struct {
 	domain        string
-	owner         string
+	host          string
+	ipVersion     ipversion.IPVersion
 	password      string
 	useProviderIP bool
 }
 
-func New(data json.RawMessage, domain, owner string) (
-	p *Provider, err error) {
+func New(data json.RawMessage, domain, host string,
+	ipVersion ipversion.IPVersion) (p *Provider, err error) {
+	if ipVersion == ipversion.IP6 {
+		return nil, fmt.Errorf("%w", errors.ErrIPv6NotSupported)
+	}
 	extraSettings := struct {
 		Password      string `json:"password"`
 		UseProviderIP bool   `json:"provider_ip"`
@@ -36,53 +40,43 @@ func New(data json.RawMessage, domain, owner string) (
 	if err != nil {
 		return nil, err
 	}
-
-	err = validateSettings(domain, extraSettings.Password)
-	if err != nil {
-		return nil, fmt.Errorf("validating provider specific settings: %w", err)
-	}
-
-	return &Provider{
+	p = &Provider{
 		domain:        domain,
-		owner:         owner,
+		host:          host,
+		ipVersion:     ipVersion,
 		password:      extraSettings.Password,
 		useProviderIP: extraSettings.UseProviderIP,
-	}, nil
+	}
+	err = p.isValid()
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 var passwordRegex = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
-func validateSettings(domain, password string) (err error) {
-	err = utils.CheckDomain(domain)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
-	}
-
-	if !passwordRegex.MatchString(password) {
-		return fmt.Errorf("%w: password %q does not match regex %q",
-			errors.ErrPasswordNotValid, password, passwordRegex)
+func (p *Provider) isValid() error {
+	if !passwordRegex.MatchString(p.password) {
+		return fmt.Errorf("%w", errors.ErrMalformedPassword)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.owner, constants.Namecheap, ipversion.IP4)
+	return utils.ToString(p.domain, p.host, constants.Namecheap, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Owner() string {
-	return p.owner
+func (p *Provider) Host() string {
+	return p.host
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
-	return ipversion.IP4
-}
-
-func (p *Provider) IPv6Suffix() netip.Prefix {
-	return netip.Prefix{}
+	return p.ipVersion
 }
 
 func (p *Provider) Proxied() bool {
@@ -90,19 +84,19 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.owner, p.domain)
+	return utils.BuildDomainName(p.host, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
-		Owner:     p.Owner(),
+		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
+		Host:      models.HTML(p.Host()),
 		Provider:  "<a href=\"https://namecheap.com\">Namecheap</a>",
-		IPVersion: ipversion.IP4.String(),
+		IPVersion: models.HTML(p.ipVersion.String()),
 	}
 }
 
-func setHeaders(request *http.Request) {
+func (p *Provider) setHeaders(request *http.Request) {
 	headers.SetUserAgent(request)
 	headers.SetAccept(request, "application/xml")
 }
@@ -114,7 +108,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 		Path:   "/update",
 	}
 	values := url.Values{}
-	values.Set("host", p.owner)
+	values.Set("host", p.host)
 	values.Set("domain", p.domain)
 	values.Set("password", p.password)
 	if !p.useProviderIP {
@@ -124,23 +118,23 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("creating http request: %w", err)
+		return netip.Addr{}, err
 	}
-	setHeaders(request)
+	p.setHeaders(request)
 
 	response, err := client.Do(request)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("doing http request: %w", err)
+		return netip.Addr{}, err
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode != http.StatusOK {
 		return netip.Addr{}, fmt.Errorf("%w: %d: %s",
-			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	decoder := xml.NewDecoder(response.Body)
-	decoder.CharsetReader = func(_ string, input io.Reader) (io.Reader, error) {
+	decoder.CharsetReader = func(encoding string, input io.Reader) (io.Reader, error) {
 		return input, nil
 	}
 
@@ -152,11 +146,11 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	}
 	err = decoder.Decode(&parsedXML)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("xml decoding response body: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
 	if parsedXML.Errors.Error != "" {
-		return netip.Addr{}, fmt.Errorf("%w: %s", errors.ErrUnsuccessful, parsedXML.Errors.Error)
+		return netip.Addr{}, fmt.Errorf("%w: %s", errors.ErrUnsuccessfulResponse, parsedXML.Errors.Error)
 	}
 
 	if parsedXML.IP == "" {

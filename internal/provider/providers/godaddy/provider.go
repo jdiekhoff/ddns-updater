@@ -20,17 +20,15 @@ import (
 )
 
 type Provider struct {
-	domain     string
-	owner      string
-	ipVersion  ipversion.IPVersion
-	ipv6Suffix netip.Prefix
-	key        string
-	secret     string
+	domain    string
+	host      string
+	ipVersion ipversion.IPVersion
+	key       string
+	secret    string
 }
 
-func New(data json.RawMessage, domain, owner string,
-	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
-	p *Provider, err error) {
+func New(data json.RawMessage, domain, host string,
+	ipVersion ipversion.IPVersion) (p *Provider, err error) {
 	extraSettings := struct {
 		Key    string `json:"key"`
 		Secret string `json:"secret"`
@@ -39,58 +37,46 @@ func New(data json.RawMessage, domain, owner string,
 	if err != nil {
 		return nil, err
 	}
-
-	err = validateSettings(domain, extraSettings.Key, extraSettings.Secret)
-	if err != nil {
-		return nil, fmt.Errorf("validating provider specific settings: %w", err)
+	p = &Provider{
+		domain:    domain,
+		host:      host,
+		ipVersion: ipVersion,
+		key:       extraSettings.Key,
+		secret:    extraSettings.Secret,
 	}
-
-	return &Provider{
-		domain:     domain,
-		owner:      owner,
-		ipVersion:  ipVersion,
-		ipv6Suffix: ipv6Suffix,
-		key:        extraSettings.Key,
-		secret:     extraSettings.Secret,
-	}, nil
+	err = p.isValid()
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
 }
 
 var keyRegex = regexp.MustCompile(`^[A-Za-z0-9]{8,14}\_[A-Za-z0-9]{21,22}$`)
 
-func validateSettings(domain, key, secret string) (err error) {
-	err = utils.CheckDomain(domain)
-	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
-	}
-
+func (p *Provider) isValid() error {
 	switch {
-	case !keyRegex.MatchString(key):
-		return fmt.Errorf("%w: key %q does not match regex %s",
-			errors.ErrKeyNotValid, key, keyRegex)
-	case secret == "":
-		return fmt.Errorf("%w", errors.ErrSecretNotSet)
+	case !keyRegex.MatchString(p.key):
+		return fmt.Errorf("%w", errors.ErrMalformedKey)
+	case p.secret == "":
+		return fmt.Errorf("%w", errors.ErrEmptySecret)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.owner, constants.GoDaddy, p.ipVersion)
+	return utils.ToString(p.domain, p.host, constants.GoDaddy, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Owner() string {
-	return p.owner
+func (p *Provider) Host() string {
+	return p.host
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
-}
-
-func (p *Provider) IPv6Suffix() netip.Prefix {
-	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -98,16 +84,23 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.owner, p.domain)
+	return utils.BuildDomainName(p.host, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
-		Owner:     p.Owner(),
-		Provider:  "<a href=\"https://www.godaddy.com/en-ie\">GoDaddy</a>",
-		IPVersion: p.ipVersion.String(),
+		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
+		Host:      models.HTML(p.Host()),
+		Provider:  "<a href=\"https://godaddy.com\">GoDaddy</a>",
+		IPVersion: models.HTML(p.ipVersion.String()),
 	}
+}
+
+func (p *Provider) setHeaders(request *http.Request) {
+	headers.SetUserAgent(request)
+	headers.SetAuthSSOKey(request, p.key, p.secret)
+	headers.SetContentType(request, "application/json")
+	headers.SetAccept(request, "application/json")
 }
 
 func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Addr) (newIP netip.Addr, err error) {
@@ -121,7 +114,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	u := url.URL{
 		Scheme: "https",
 		Host:   "api.godaddy.com",
-		Path:   fmt.Sprintf("/v1/domains/%s/records/%s/%s", p.domain, recordType, p.owner),
+		Path:   fmt.Sprintf("/v1/domains/%s/records/%s/%s", p.domain, recordType, p.host),
 	}
 
 	buffer := bytes.NewBuffer(nil)
@@ -131,21 +124,18 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	}
 	err = encoder.Encode(requestData)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("json encoding request data: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrRequestEncode, err)
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), buffer)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("creating http request: %w", err)
+		return netip.Addr{}, err
 	}
-	headers.SetUserAgent(request)
-	headers.SetAuthSSOKey(request, p.key, p.secret)
-	headers.SetContentType(request, "application/json")
-	headers.SetAccept(request, "application/json")
+	p.setHeaders(request)
 
 	response, err := client.Do(request)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("doing http request: %w", err)
+		return netip.Addr{}, err
 	}
 	defer response.Body.Close()
 
@@ -155,10 +145,10 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("reading response body: %w", err)
+		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
 	}
 
-	err = fmt.Errorf("%w: %d", errors.ErrHTTPStatusNotValid, response.StatusCode)
+	err = fmt.Errorf("%w: %d", errors.ErrBadHTTPStatus, response.StatusCode)
 	var parsedJSON struct {
 		Message string `json:"message"`
 	}
@@ -166,15 +156,5 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	if jsonErr != nil || parsedJSON.Message == "" {
 		return netip.Addr{}, fmt.Errorf("%w: %s", err, utils.ToSingleLine(string(b)))
 	}
-
-	err = fmt.Errorf("%w: %s", err, parsedJSON.Message)
-
-	if response.StatusCode == http.StatusForbidden &&
-		parsedJSON.Message == "Authenticated user is not allowed access" {
-		err = fmt.Errorf("%w - "+
-			"See https://github.com/qdm12/ddns-updater/issues/707#issuecomment-2089632215",
-			err)
-	}
-
-	return netip.Addr{}, err
+	return netip.Addr{}, fmt.Errorf("%w: %s", err, parsedJSON.Message)
 }

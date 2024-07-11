@@ -6,8 +6,28 @@ import (
 	"os"
 )
 
-func zipFiles(outputFilepath string, inputFilepaths ...string) error {
-	f, err := os.Create(outputFilepath)
+var _ FileZiper = (*Ziper)(nil)
+
+type FileZiper interface {
+	ZipFiles(outputFilepath string, inputFilepaths ...string) error
+}
+
+type Ziper struct {
+	createFile func(name string) (*os.File, error)
+	openFile   func(name string) (*os.File, error)
+	ioCopy     func(dst io.Writer, src io.Reader) (written int64, err error)
+}
+
+func NewZiper() *Ziper {
+	return &Ziper{
+		createFile: os.Create,
+		openFile:   os.Open,
+		ioCopy:     io.Copy,
+	}
+}
+
+func (z *Ziper) ZipFiles(outputFilepath string, inputFilepaths ...string) error {
+	f, err := z.createFile(outputFilepath)
 	if err != nil {
 		return err
 	}
@@ -15,7 +35,7 @@ func zipFiles(outputFilepath string, inputFilepaths ...string) error {
 	w := zip.NewWriter(f)
 	defer w.Close()
 	for _, filepath := range inputFilepaths {
-		err = addFile(w, filepath)
+		err = z.addFile(w, filepath)
 		if err != nil {
 			return err
 		}
@@ -23,8 +43,8 @@ func zipFiles(outputFilepath string, inputFilepaths ...string) error {
 	return nil
 }
 
-func addFile(w *zip.Writer, filepath string) error {
-	f, err := os.Open(filepath)
+func (z *Ziper) addFile(w *zip.Writer, filepath string) error {
+	f, err := z.openFile(filepath)
 	if err != nil {
 		return err
 	}
@@ -45,6 +65,6 @@ func addFile(w *zip.Writer, filepath string) error {
 	if err != nil {
 		return err
 	}
-	_, err = io.Copy(ioWriter, f)
+	_, err = z.ioCopy(ioWriter, f)
 	return err
 }

@@ -1,4 +1,6 @@
 linters-settings:
+  maligned:
+    suggest-new: true
   misspell:
     locale: US
 
@@ -9,12 +11,6 @@ issues:
         - containedctx
         - dupl
         - goerr113
-    - text: Function `exitHealthchecksio` should pass the context parameter
-      linters:
-        - contextcheck
-    - source: "See https://"
-      linters:
-        - lll
 
 linters:
   enable:
@@ -24,7 +20,6 @@ linters:
     - bidichk
     - bodyclose
     - containedctx
-    - contextcheck
     - decorder
     - dogsled
     - dupl
@@ -41,7 +36,6 @@ linters:
     - gocheckcompilerdirectives
     - gochecknoglobals
     - gochecknoinits
-    - gochecksumtype
     - gocognit
     - goconst
     - gocritic
@@ -54,10 +48,8 @@ linters:
     - gomoddirectives
     - goprintffuncname
     - gosec
-    - gosmopolitan
     - grouper
     - importas
-    - inamedparam
     - interfacebloat
     - ireturn
     - lll
@@ -73,17 +65,13 @@ linters:
     - nolintlint
     - nosprintfhostport
     - paralleltest
-    - perfsprint
     - prealloc
     - predeclared
     - promlinter
-    - protogetter
     - reassign
     - revive
     - rowserrcheck
-    - sloglint
     - sqlclosecheck
-    - tagalign
     - tenv
     - thelper
     - tparallel
@@ -92,4 +80,8 @@ linters:
     - usestdlibvars
     - wastedassign
     - whitespace
-    - zerologlint
+
+run:
+  skip-dirs:
+    - .devcontainer
+    - .github
