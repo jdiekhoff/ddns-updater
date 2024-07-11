@@ -19,21 +19,21 @@ import (
 )
 
 type Provider struct {
-	domain        string
-	host          string
-	ipVersion     ipversion.IPVersion
-	username      string
-	clientKey     string
-	useProviderIP bool
+	domain     string
+	owner      string
+	ipVersion  ipversion.IPVersion
+	ipv6Suffix netip.Prefix
+	username   string
+	clientKey  string
 }
 
-func New(data json.RawMessage, domain, host string,
-	ipVersion ipversion.IPVersion) (p *Provider, err error) {
+func New(data json.RawMessage, domain, owner string,
+	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
+	p *Provider, err error) {
 	extraSettings := struct {
-		Username      string `json:"username"`
-		Password      string `json:"password"` // Retro-compatibility
-		ClientKey     string `json:"client_key"`
-		UseProviderIP bool   `json:"provider_ip"`
+		Username  string `json:"username"`
+		Password  string `json:"password"` // Retro-compatibility
+		ClientKey string `json:"client_key"`
 	}{}
 	err = json.Unmarshal(data, &extraSettings)
 	if err != nil {
@@ -45,47 +45,54 @@ func New(data json.RawMessage, domain, host string,
 		clientKey = extraSettings.Password
 	}
 
-	p = &Provider{
-		domain:        domain,
-		host:          host,
-		ipVersion:     ipVersion,
-		username:      extraSettings.Username,
-		clientKey:     clientKey,
-		useProviderIP: extraSettings.UseProviderIP,
-	}
-	err = p.isValid()
+	err = validateSettings(domain, extraSettings.Username, clientKey)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validating provider specific settings: %w", err)
 	}
-	return p, nil
+
+	return &Provider{
+		domain:     domain,
+		owner:      owner,
+		ipVersion:  ipVersion,
+		ipv6Suffix: ipv6Suffix,
+		username:   extraSettings.Username,
+		clientKey:  clientKey,
+	}, nil
 }
 
-func (p *Provider) isValid() error {
+func validateSettings(domain, username, clientKey string) (err error) {
+	err = utils.CheckDomain(domain)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
+	}
+
 	switch {
-	case p.username == "":
-		return fmt.Errorf("%w", errors.ErrEmptyUsername)
-	case p.clientKey == "":
-		return fmt.Errorf("%w", errors.ErrEmptyPassword)
-	case p.host == "*":
-		return fmt.Errorf("%w", errors.ErrHostWildcard)
+	case username == "":
+		return fmt.Errorf("%w", errors.ErrUsernameNotSet)
+	case clientKey == "":
+		return fmt.Errorf("%w", errors.ErrPasswordNotSet)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return fmt.Sprintf("[domain: %s | host: %s | provider: Dyn]", p.domain, p.host)
+	return utils.ToString(p.domain, p.owner, constants.Dyn, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Host() string {
-	return p.host
+func (p *Provider) Owner() string {
+	return p.owner
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
+}
+
+func (p *Provider) IPv6Suffix() netip.Prefix {
+	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -93,18 +100,19 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.host, p.domain)
+	return utils.BuildDomainName(p.owner, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
-		Host:      models.HTML(p.Host()),
+		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
+		Owner:     p.Owner(),
 		Provider:  "<a href=\"https://dyn.com/\">Dyn DNS</a>",
-		IPVersion: models.HTML(p.ipVersion.String()),
+		IPVersion: p.ipVersion.String(),
 	}
 }
 
+// See https://help.dyn.com/remote-access-api/perform-update/
 func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Addr) (newIP netip.Addr, err error) {
 	u := url.URL{
 		Scheme: "https",
@@ -113,15 +121,13 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 		Path:   "/v3/update",
 	}
 	values := url.Values{}
-	values.Set("hostname", utils.BuildURLQueryHostname(p.host, p.domain))
-	if !p.useProviderIP {
-		values.Set("myip", ip.String())
-	}
+	values.Set("hostname", utils.BuildURLQueryHostname(p.owner, p.domain))
+	values.Set("myip", ip.String())
 	u.RawQuery = values.Encode()
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, fmt.Errorf("creating http request: %w", err)
 	}
 	headers.SetUserAgent(request)
 
@@ -133,13 +139,13 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return netip.Addr{}, fmt.Errorf("reading response body: %w", err)
 	}
 	s := string(b)
 
 	if response.StatusCode != http.StatusOK {
 		return netip.Addr{}, fmt.Errorf("%w: %d: %s",
-			errors.ErrBadHTTPStatus, response.StatusCode, utils.ToSingleLine(s))
+			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.ToSingleLine(s))
 	}
 
 	switch {

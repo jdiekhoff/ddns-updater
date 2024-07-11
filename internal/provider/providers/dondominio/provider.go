@@ -18,71 +18,86 @@ import (
 )
 
 type Provider struct {
-	domain    string
-	host      string
-	ipVersion ipversion.IPVersion
-	username  string
-	password  string
-	name      string
+	domain     string
+	owner      string
+	ipVersion  ipversion.IPVersion
+	ipv6Suffix netip.Prefix
+	username   string
+	key        string
+	name       string
 }
 
-func New(data json.RawMessage, domain, host string,
-	ipVersion ipversion.IPVersion) (p *Provider, err error) {
+func New(data json.RawMessage, domain, owner string,
+	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
+	p *Provider, err error) {
 	extraSettings := struct {
 		Username string `json:"username"`
-		Password string `json:"password"`
+		Password string `json:"password"` // retro-compatibility
+		Key      string `json:"key"`
 		Name     string `json:"name"`
 	}{}
 	err = json.Unmarshal(data, &extraSettings)
 	if err != nil {
 		return nil, err
 	}
-	if host == "" {
-		host = "@" // default
+	if owner == "" {
+		owner = "@" // default
 	}
-	p = &Provider{
-		domain:    domain,
-		host:      host,
-		ipVersion: ipVersion,
-		username:  extraSettings.Username,
-		password:  extraSettings.Password,
-		name:      extraSettings.Name,
+	if extraSettings.Password != "" { // retro-compatibility
+		extraSettings.Key = extraSettings.Password
 	}
-	err = p.isValid()
+
+	err = validateSettings(domain, extraSettings.Username, extraSettings.Key, extraSettings.Name)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validating provider specific settings: %w", err)
 	}
-	return p, nil
+
+	return &Provider{
+		domain:     domain,
+		owner:      owner,
+		ipVersion:  ipVersion,
+		ipv6Suffix: ipv6Suffix,
+		username:   extraSettings.Username,
+		key:        extraSettings.Key,
+		name:       extraSettings.Name,
+	}, nil
 }
 
-func (p *Provider) isValid() error {
+func validateSettings(domain, username, key, name string) (err error) {
+	err = utils.CheckDomain(domain)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
+	}
+
 	switch {
-	case p.username == "":
-		return fmt.Errorf("%w", errors.ErrEmptyUsername)
-	case p.password == "":
-		return fmt.Errorf("%w", errors.ErrEmptyPassword)
-	case p.name == "":
-		return fmt.Errorf("%w", errors.ErrEmptyName)
-	case p.host != "@":
-		return fmt.Errorf("%w", errors.ErrHostOnlyAt)
+	case username == "":
+		return fmt.Errorf("%w", errors.ErrUsernameNotSet)
+	case key == "":
+		return fmt.Errorf("%w", errors.ErrKeyNotSet)
+	case name == "":
+		return fmt.Errorf("%w", errors.ErrNameNotSet)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.host, constants.DonDominio, p.ipVersion)
+	return utils.ToString(p.domain, p.owner, constants.DonDominio, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Host() string {
-	return p.host
+func (p *Provider) Owner() string {
+	return p.owner
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
+}
+
+func (p *Provider) IPv6Suffix() netip.Prefix {
+	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -90,91 +105,65 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.host, p.domain)
+	return utils.BuildDomainName(p.owner, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
-		Host:      models.HTML(p.Host()),
+		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
+		Owner:     p.Owner(),
 		Provider:  "<a href=\"https://www.dondominio.com/\">DonDominio</a>",
-		IPVersion: models.HTML(p.ipVersion.String()),
+		IPVersion: p.ipVersion.String(),
 	}
-}
-
-func (p *Provider) setHeaders(request *http.Request) {
-	headers.SetUserAgent(request)
-	headers.SetContentType(request, "application/x-www-form-urlencoded")
-	headers.SetAccept(request, "application/json")
 }
 
 func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Addr) (newIP netip.Addr, err error) {
 	u := url.URL{
 		Scheme: "https",
-		Host:   "simple-api.dondominio.net",
+		Host:   "dondns.dondominio.com",
+		Path:   "/json/",
+		RawQuery: url.Values{
+			"user":   {p.username},
+			"apikey": {p.key},
+			"host":   {p.BuildDomainName()},
+			"ip":     {ip.String()},
+			"lang":   {"en"},
+		}.Encode(),
 	}
-	values := url.Values{}
-	values.Set("apiuser", p.username)
-	values.Set("apipasswd", p.password)
-	values.Set("domain", p.domain)
-	values.Set("name", p.name)
-	isIPv4 := ip.Is4()
-	if isIPv4 {
-		values.Set("ipv4", ip.String())
-	} else {
-		values.Set("ipv6", ip.String())
-	}
-	encodedValues := values.Encode()
-	buffer := strings.NewReader(encodedValues)
 
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), buffer)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, fmt.Errorf("creating http request: %w", err)
 	}
-	p.setHeaders(request)
+	headers.SetUserAgent(request)
+	headers.SetAccept(request, "application/json")
 
 	response, err := client.Do(request)
 	if err != nil {
 		return netip.Addr{}, err
 	}
-	defer response.Body.Close()
 
-	if response.StatusCode != http.StatusOK {
-		return netip.Addr{}, fmt.Errorf("%w: %d: %s",
-			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
+	var data struct {
+		Success  bool     `json:"success"`
+		Messages []string `json:"messages"`
 	}
-
 	decoder := json.NewDecoder(response.Body)
-	var responseData struct {
-		Success          bool   `json:"success"`
-		ErrorCode        int    `json:"errorCode"`
-		ErrorCodeMessage string `json:"errorCodeMsg"`
-		ResponseData     struct {
-			GlueRecords []struct {
-				IPv4 string `json:"ipv4"`
-				IPv6 string `json:"ipv6"`
-			} `json:"gluerecords"`
-		} `json:"responseData"`
-	}
-	err = decoder.Decode(&responseData)
+	err = decoder.Decode(&data)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		_ = response.Body.Close()
+		return netip.Addr{}, fmt.Errorf("decoding response body: %w", err)
 	}
 
-	if !responseData.Success {
-		return netip.Addr{}, fmt.Errorf("%w: %s (error code %d)",
-			errors.ErrUnsuccessfulResponse, responseData.ErrorCodeMessage, responseData.ErrorCode)
-	}
-	ipString := responseData.ResponseData.GlueRecords[0].IPv4
-	if !isIPv4 {
-		ipString = responseData.ResponseData.GlueRecords[0].IPv6
-	}
-	newIP, err = netip.ParseAddr(ipString)
+	err = response.Body.Close()
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrIPReceivedMalformed, err)
-	} else if ip.Compare(newIP) != 0 {
-		return netip.Addr{}, fmt.Errorf("%w: sent ip %s to update but received %s",
-			errors.ErrIPReceivedMismatch, ip, newIP)
+		return netip.Addr{}, fmt.Errorf("closing response body: %w", err)
 	}
-	return newIP, nil
+
+	if !data.Success {
+		_ = response.Body.Close()
+		return netip.Addr{}, fmt.Errorf("%w: %s",
+			errors.ErrUnsuccessful, strings.Join(data.Messages, ", "))
+	}
+
+	return ip, nil
 }

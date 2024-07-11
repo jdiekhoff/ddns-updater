@@ -27,7 +27,7 @@ func (p *Provider) createRecord(ctx context.Context,
 	values := newURLValues(p.accessKeyID)
 	values.Set("Action", "AddDomainRecord")
 	values.Set("DomainName", p.domain)
-	values.Set("RR", p.host)
+	values.Set("RR", p.owner)
 	values.Set("Type", recordType)
 	values.Set("Value", ip.String())
 
@@ -37,8 +37,9 @@ func (p *Provider) createRecord(ctx context.Context,
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", errors.ErrBadRequest, err)
+		return "", fmt.Errorf("creating http request: %w", err)
 	}
+	setHeaders(request)
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -48,7 +49,7 @@ func (p *Provider) createRecord(ctx context.Context,
 
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("%w: %d: %s",
-			errors.ErrBadHTTPStatus, response.StatusCode,
+			errors.ErrHTTPStatusNotValid, response.StatusCode,
 			utils.BodyToSingleLine(response.Body))
 	}
 
@@ -58,7 +59,7 @@ func (p *Provider) createRecord(ctx context.Context,
 	decoder := json.NewDecoder(response.Body)
 	err = decoder.Decode(&data)
 	if err != nil {
-		return "", fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return "", fmt.Errorf("json decoding response body: %w", err)
 	}
 
 	return data.RecordID, nil

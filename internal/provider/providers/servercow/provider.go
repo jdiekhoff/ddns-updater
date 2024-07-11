@@ -19,22 +19,27 @@ import (
 )
 
 type Provider struct {
-	username      string
-	host          string
 	domain        string
+	owner         string
 	ipVersion     ipversion.IPVersion
+	ipv6Suffix    netip.Prefix
+	username      string
 	password      string
 	useProviderIP bool
-	ttl           uint
+	ttl           uint32
 }
 
-func New(data json.RawMessage, domain, host string, ipVersion ipversion.IPVersion) (
+func New(data json.RawMessage, domain, owner string, ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
 	p *Provider, err error) {
+	// retro compatibility
+	if owner == "" {
+		owner = "@"
+	}
+
 	extraSettings := struct {
 		Username      string `json:"username"`
 		Password      string `json:"password"`
-		Domain        string `json:"domain"`
-		TTL           uint   `json:"ttl"`
+		TTL           uint32 `json:"ttl"`
 		UseProviderIP bool   `json:"provider_ip"`
 	}{}
 	err = json.Unmarshal(data, &extraSettings)
@@ -42,49 +47,59 @@ func New(data json.RawMessage, domain, host string, ipVersion ipversion.IPVersio
 		return nil, err
 	}
 
-	p = &Provider{
-		host:          host,
+	err = validateSettings(domain, owner, extraSettings.Username, extraSettings.Password)
+	if err != nil {
+		return nil, fmt.Errorf("validating provider specific settings: %w", err)
+	}
+
+	return &Provider{
+		domain:        domain,
+		owner:         owner,
 		ipVersion:     ipVersion,
+		ipv6Suffix:    ipv6Suffix,
 		username:      extraSettings.Username,
 		password:      extraSettings.Password,
 		useProviderIP: extraSettings.UseProviderIP,
-		domain:        extraSettings.Domain,
 		ttl:           extraSettings.TTL,
-	}
-	err = p.isValid()
-	if err != nil {
-		return nil, err
-	}
-	return p, nil
+	}, nil
 }
 
-func (p *Provider) isValid() error {
-	switch {
-	case p.username == "":
-		return fmt.Errorf("%w", errors.ErrEmptyUsername)
-	case p.password == "":
-		return fmt.Errorf("%w", errors.ErrEmptyPassword)
+func validateSettings(domain, owner, username, password string) (err error) {
+	err = utils.CheckDomain(domain)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
 	}
-	if strings.Contains(p.host, "*") {
-		return fmt.Errorf("%w", errors.ErrHostWildcard)
+
+	// v3: enforce owner is not empty
+	switch {
+	case strings.Contains(owner, "*"):
+		return fmt.Errorf("%w", errors.ErrOwnerWildcard)
+	case username == "":
+		return fmt.Errorf("%w", errors.ErrUsernameNotSet)
+	case password == "":
+		return fmt.Errorf("%w", errors.ErrPasswordNotSet)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString("servercow.de", p.host, constants.Servercow, p.ipVersion)
+	return utils.ToString("servercow.de", p.owner, constants.Servercow, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Host() string {
-	return p.host
+func (p *Provider) Owner() string {
+	return p.owner
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
+}
+
+func (p *Provider) IPv6Suffix() netip.Prefix {
+	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -92,15 +107,15 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.host, p.domain)
+	return utils.BuildDomainName(p.owner, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
-		Host:      models.HTML(p.Host()),
+		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
+		Owner:     p.Owner(),
 		Provider:  "<a href=\"https://servercow.de\">Servercow</a>",
-		IPVersion: models.HTML(p.ipVersion.String()),
+		IPVersion: p.ipVersion.String(),
 	}
 }
 
@@ -115,19 +130,19 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 		Path:   "/dns/v1/domains/" + p.domain,
 	}
 
-	updateHost := p.host
-	if updateHost == "@" {
-		updateHost = ""
+	name := p.owner
+	if name == "@" {
+		name = ""
 	}
 
 	requestData := struct {
 		Type    string `json:"type"`    // constants.A or constants.AAAA depending on ip address given
 		Name    string `json:"name"`    // DNS record name (only the subdomain part)
 		Content string `json:"content"` // ip address
-		TTL     uint   `json:"ttl"`
+		TTL     uint32 `json:"ttl"`
 	}{
 		Type:    recordType,
-		Name:    updateHost,
+		Name:    name,
 		Content: ip.String(),
 		TTL:     p.ttl,
 	}
@@ -136,27 +151,28 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	encoder := json.NewEncoder(buffer)
 	err = encoder.Encode(requestData)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrRequestEncode, err)
+		return netip.Addr{}, fmt.Errorf("json encoding request data: %w", err)
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), buffer)
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, fmt.Errorf("creating http request: %w", err)
 	}
 	headers.SetContentType(request, "application/json")
+	headers.SetAccept(request, "application/json")
 	headers.SetXAuthUsername(request, p.username)
 	headers.SetXAuthPassword(request, p.password)
 	headers.SetUserAgent(request)
 
 	response, err := client.Do(request)
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, fmt.Errorf("doing http request: %w", err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode > http.StatusUnsupportedMediaType {
 		return netip.Addr{}, fmt.Errorf("%w: %d: %s",
-			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	decoder := json.NewDecoder(response.Body)
@@ -168,11 +184,11 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 
 	err = decoder.Decode(&parsedJSON)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return netip.Addr{}, fmt.Errorf("json decoding response body: %w", err)
 	}
 
 	if parsedJSON.Message != "ok" {
-		return netip.Addr{}, fmt.Errorf("%w: %s", errors.ErrUnsuccessfulResponse, parsedJSON.Error)
+		return netip.Addr{}, fmt.Errorf("%w: %s", errors.ErrUnsuccessful, parsedJSON.Error)
 	}
 
 	return ip, nil

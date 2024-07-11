@@ -5,27 +5,25 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-
-	"github.com/qdm12/ddns-updater/internal/provider/errors"
 )
 
 func (p *Provider) refresh(ctx context.Context, client *http.Client, timestamp int64) (err error) {
 	u := url.URL{
 		Scheme: p.apiURL.Scheme,
 		Host:   p.apiURL.Host,
-		Path:   p.apiURL.Path + "/domain/zone/" + p.domain + "/refresh",
+		Path:   fmt.Sprintf("%s/domain/zone/%s/refresh", p.apiURL.Path, p.domain),
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), nil)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrBadRequest, err)
+		return fmt.Errorf("creating http request: %w", err)
 	}
 	p.setHeaderCommon(request.Header)
 	p.setHeaderAuth(request.Header, timestamp, request.Method, request.URL, nil)
 
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrUnsuccessfulResponse, err)
+		return fmt.Errorf("doing http request: %w", err)
 	}
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {

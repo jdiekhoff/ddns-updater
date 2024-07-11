@@ -19,14 +19,16 @@ import (
 )
 
 type Provider struct {
-	domain    string
-	host      string
-	ipVersion ipversion.IPVersion
-	token     string
+	domain     string
+	owner      string
+	ipVersion  ipversion.IPVersion
+	ipv6Suffix netip.Prefix
+	token      string
 }
 
-func New(data json.RawMessage, domain, host string,
-	ipVersion ipversion.IPVersion) (p *Provider, err error) {
+func New(data json.RawMessage, domain, owner string,
+	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
+	p *Provider, err error) {
 	extraSettings := struct {
 		Token string `json:"token"`
 	}{}
@@ -34,40 +36,51 @@ func New(data json.RawMessage, domain, host string,
 	if err != nil {
 		return nil, err
 	}
-	p = &Provider{
-		domain:    domain,
-		host:      host,
-		ipVersion: ipVersion,
-		token:     extraSettings.Token,
-	}
-	err = p.isValid()
+
+	err = validateSettings(domain, extraSettings.Token)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validating provider specific settings: %w", err)
 	}
-	return p, nil
+
+	return &Provider{
+		domain:     domain,
+		owner:      owner,
+		ipVersion:  ipVersion,
+		ipv6Suffix: ipv6Suffix,
+		token:      extraSettings.Token,
+	}, nil
 }
 
-func (p *Provider) isValid() error {
-	if p.token == "" {
-		return fmt.Errorf("%w", errors.ErrEmptyToken)
+func validateSettings(domain, token string) (err error) {
+	err = utils.CheckDomain(domain)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
+	}
+
+	if token == "" {
+		return fmt.Errorf("%w", errors.ErrTokenNotSet)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.host, constants.DNSPod, p.ipVersion)
+	return utils.ToString(p.domain, p.owner, constants.DNSPod, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Host() string {
-	return p.host
+func (p *Provider) Owner() string {
+	return p.owner
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
+}
+
+func (p *Provider) IPv6Suffix() netip.Prefix {
+	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -75,19 +88,19 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.host, p.domain)
+	return utils.BuildDomainName(p.owner, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
-		Host:      models.HTML(p.Host()),
+		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
+		Owner:     p.Owner(),
 		Provider:  "<a href=\"https://www.dnspod.cn/\">DNSPod</a>",
-		IPVersion: models.HTML(p.ipVersion.String()),
+		IPVersion: p.ipVersion.String(),
 	}
 }
 
-func (p *Provider) setHeaders(request *http.Request) {
+func setHeaders(request *http.Request) {
 	headers.SetContentType(request, "application/x-www-form-urlencoded")
 	headers.SetAccept(request, "application/json")
 	headers.SetUserAgent(request)
@@ -109,16 +122,16 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	values.Set("format", "json")
 	values.Set("domain", p.domain)
 	values.Set("length", "200")
-	values.Set("sub_domain", p.host)
+	values.Set("sub_domain", p.owner)
 	values.Set("record_type", recordType)
 	encodedValues := values.Encode()
 	buffer := bytes.NewBufferString(encodedValues)
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), buffer)
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, fmt.Errorf("creating http request: %w", err)
 	}
-	p.setHeaders(request)
+	setHeaders(request)
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -128,7 +141,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 
 	if response.StatusCode != http.StatusOK {
 		return netip.Addr{}, fmt.Errorf("%w: %d: %s",
-			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	decoder := json.NewDecoder(response.Body)
@@ -143,12 +156,12 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	}
 	err = decoder.Decode(&recordResp)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return netip.Addr{}, fmt.Errorf("json decoding response body: %w", err)
 	}
 
 	var recordID, recordLine string
 	for _, record := range recordResp.Records {
-		if record.Type == recordType && record.Name == p.host {
+		if record.Type == recordType && record.Name == p.owner {
 			receivedIP, err := netip.ParseAddr(record.Value)
 			if err == nil && ip.Compare(receivedIP) == 0 {
 				return ip, nil
@@ -159,7 +172,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 		}
 	}
 	if recordID == "" {
-		return netip.Addr{}, fmt.Errorf("%w", errors.ErrNotFound)
+		return netip.Addr{}, fmt.Errorf("%w", errors.ErrRecordNotFound)
 	}
 
 	u.Path = "/Record.Ddns"
@@ -170,15 +183,15 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	values.Set("record_id", recordID)
 	values.Set("value", ip.String())
 	values.Set("record_line", recordLine)
-	values.Set("sub_domain", p.host)
+	values.Set("sub_domain", p.owner)
 	encodedValues = values.Encode()
 	buffer = bytes.NewBufferString(encodedValues)
 
 	request, err = http.NewRequestWithContext(ctx, http.MethodPost, u.String(), buffer)
 	if err != nil {
-		return netip.Addr{}, err
+		return netip.Addr{}, fmt.Errorf("creating http request: %w", err)
 	}
-	p.setHeaders(request)
+	setHeaders(request)
 
 	response, err = client.Do(request)
 	if err != nil {
@@ -188,7 +201,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 
 	if response.StatusCode != http.StatusOK {
 		return netip.Addr{}, fmt.Errorf("%w: %d: %s",
-			errors.ErrBadHTTPStatus, response.StatusCode, utils.BodyToSingleLine(response.Body))
+			errors.ErrHTTPStatusNotValid, response.StatusCode, utils.BodyToSingleLine(response.Body))
 	}
 
 	data, err := io.ReadAll(response.Body)
@@ -205,7 +218,7 @@ func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Add
 	}
 	err = json.Unmarshal(data, &ddnsResp)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return netip.Addr{}, fmt.Errorf("json decoding response body: %w", err)
 	}
 
 	ipStr := ddnsResp.Record.Value

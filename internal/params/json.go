@@ -6,20 +6,27 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/netip"
 	"os"
 	"strings"
 
 	"github.com/qdm12/ddns-updater/internal/models"
 	"github.com/qdm12/ddns-updater/internal/provider"
-	"github.com/qdm12/ddns-updater/internal/provider/constants"
+	"github.com/qdm12/ddns-updater/internal/provider/utils"
 	"github.com/qdm12/ddns-updater/pkg/publicip/ipversion"
+	"golang.org/x/net/publicsuffix"
 )
 
 type commonSettings struct {
-	Provider  string `json:"provider"`
-	Domain    string `json:"domain"`
-	Host      string `json:"host"`
-	IPVersion string `json:"ip_version"`
+	Provider string `json:"provider"`
+	Domain   string `json:"domain"`
+	// Host is kept for retro-compatibility and is replaced by Owner.
+	Host string `json:"host,omitempty"`
+	// Owner is kept for retro-compatibility and is determined from the
+	// Domain field.
+	Owner      string       `json:"owner,omitempty"`
+	IPVersion  string       `json:"ip_version"`
+	IPv6Suffix netip.Prefix `json:"ipv6_suffix,omitempty"`
 	// Retro values for warnings
 	IPMethod *string `json:"ip_method,omitempty"`
 	Delay    *uint64 `json:"delay,omitempty"`
@@ -117,9 +124,15 @@ func extractAllSettings(jsonBytes []byte) (
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %w", errUnmarshalRaw, err)
 	}
+	// TODO(v3): remove retro compatibility with IPV6_PREFIX
+	retroIPv6Suffix, err := getRetroIPv6Suffix()
+	if err != nil {
+		return nil, nil, fmt.Errorf("getting retro-compatible global IPV6 suffix: %w", err)
+	}
 
 	for i, common := range config.CommonSettings {
-		newProvider, newWarnings, err := makeSettingsFromObject(common, rawConfig.Settings[i])
+		newProvider, newWarnings, err := makeSettingsFromObject(common, rawConfig.Settings[i],
+			retroIPv6Suffix)
 		warnings = append(warnings, newWarnings...)
 		if err != nil {
 			return nil, warnings, err
@@ -130,24 +143,39 @@ func extractAllSettings(jsonBytes []byte) (
 	return allProviders, warnings, nil
 }
 
-func makeSettingsFromObject(common commonSettings, rawSettings json.RawMessage) (
+var (
+	ErrProviderNoLongerSupported = errors.New("provider no longer supported")
+)
+
+func makeSettingsFromObject(common commonSettings, rawSettings json.RawMessage,
+	retroGlobalIPv6Suffix netip.Prefix) (
 	providers []provider.Provider, warnings []string, err error) {
-	providerName := models.Provider(common.Provider)
-	if providerName == constants.DuckDNS { // only hosts, no domain
-		if common.Domain != "" { // retro compatibility
-			if common.Host == "" {
-				common.Host = strings.TrimSuffix(common.Domain, ".duckdns.org")
-				warnings = append(warnings,
-					fmt.Sprintf("DuckDNS record should have %q specified as host instead of %q as domain",
-						common.Host, common.Domain))
-			} else {
-				warnings = append(warnings,
-					fmt.Sprintf("ignoring domain %q because host %q is specified for DuckDNS record",
-						common.Domain, common.Host))
-			}
+	if common.Provider == "google" {
+		return nil, nil, fmt.Errorf("%w: %s", ErrProviderNoLongerSupported, common.Provider)
+	}
+
+	if common.Owner == "" { // retro compatibility
+		common.Owner = common.Host
+	}
+
+	var domain string
+	var owners []string
+	if common.Owner != "" { // retro compatibility
+		owners = strings.Split(common.Owner, ",")
+		domain = common.Domain // single domain only
+		domains := make([]string, len(owners))
+		for i, owner := range owners {
+			domains[i] = utils.BuildURLQueryHostname(owner, common.Domain)
+		}
+		warnings = append(warnings,
+			fmt.Sprintf("you can specify the owner %q directly in the domain field as %q",
+				common.Owner, strings.Join(domains, ",")))
+	} else { // extract owner(s) from domain(s)
+		domain, owners, err = extractFromDomainField(common.Domain)
+		if err != nil {
+			return nil, nil, fmt.Errorf("extracting owners from domains: %w", err)
 		}
 	}
-	hosts := strings.Split(common.Host, ",")
 
 	if common.IPVersion == "" {
 		common.IPVersion = ipversion.IP4or6.String()
@@ -157,13 +185,54 @@ func makeSettingsFromObject(common commonSettings, rawSettings json.RawMessage) 
 		return nil, nil, err
 	}
 
-	providers = make([]provider.Provider, len(hosts))
-	for i, host := range hosts {
-		providers[i], err = provider.New(providerName, rawSettings, common.Domain,
-			host, ipVersion)
+	ipv6Suffix := common.IPv6Suffix
+	if !ipv6Suffix.IsValid() {
+		ipv6Suffix = retroGlobalIPv6Suffix
+	}
+
+	if ipVersion == ipversion.IP4 && ipv6Suffix.IsValid() {
+		warnings = append(warnings,
+			fmt.Sprintf("IPv6 suffix specified as %s but IP version is %s",
+				ipv6Suffix, ipVersion))
+	}
+
+	providerName := models.Provider(common.Provider)
+	providers = make([]provider.Provider, len(owners))
+	for i, owner := range owners {
+		owner = strings.TrimSpace(owner)
+		providers[i], err = provider.New(providerName, rawSettings, domain,
+			owner, ipVersion, ipv6Suffix)
 		if err != nil {
 			return nil, warnings, err
 		}
 	}
 	return providers, warnings, nil
+}
+
+var (
+	ErrMultipleDomainsSpecified = errors.New("multiple domains specified")
+)
+
+func extractFromDomainField(domainField string) (domainRegistered string,
+	owners []string, err error) {
+	domains := strings.Split(domainField, ",")
+	owners = make([]string, len(domains))
+	for i, domain := range domains {
+		newDomainRegistered, err := publicsuffix.EffectiveTLDPlusOne(domain)
+		switch {
+		case err != nil:
+			return "", nil, fmt.Errorf("extracting effective TLD+1: %w", err)
+		case domainRegistered == "":
+			domainRegistered = newDomainRegistered
+		case domainRegistered != newDomainRegistered:
+			return "", nil, fmt.Errorf("%w: %q and %q",
+				ErrMultipleDomainsSpecified, domainRegistered, newDomainRegistered)
+		}
+		if domain == domainRegistered {
+			owners[i] = "@"
+			continue
+		}
+		owners[i] = strings.TrimSuffix(domain, "."+domainRegistered)
+	}
+	return domainRegistered, owners, nil
 }

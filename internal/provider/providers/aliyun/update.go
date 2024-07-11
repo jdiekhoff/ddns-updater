@@ -26,7 +26,7 @@ func (p *Provider) updateRecord(ctx context.Context, client *http.Client,
 	values := newURLValues(p.accessKeyID)
 	values.Set("Action", "UpdateDomainRecord")
 	values.Set("RecordId", recordID)
-	values.Set("RR", p.host)
+	values.Set("RR", p.owner)
 	values.Set("Type", recordType)
 	values.Set("Value", ip.String())
 
@@ -36,8 +36,9 @@ func (p *Provider) updateRecord(ctx context.Context, client *http.Client,
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrBadRequest, err)
+		return fmt.Errorf("creating http request: %w", err)
 	}
+	setHeaders(request)
 
 	response, err := client.Do(request)
 	if err != nil {
@@ -49,7 +50,7 @@ func (p *Provider) updateRecord(ctx context.Context, client *http.Client,
 	case http.StatusOK:
 	default:
 		return fmt.Errorf("%w: %d: %s",
-			errors.ErrBadHTTPStatus, response.StatusCode,
+			errors.ErrHTTPStatusNotValid, response.StatusCode,
 			utils.BodyToSingleLine(response.Body))
 	}
 

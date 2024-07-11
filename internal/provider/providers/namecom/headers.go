@@ -7,7 +7,6 @@ import (
 )
 
 func setHeaders(request *http.Request) {
-	headers.SetContentType(request, "application/json")
 	headers.SetAccept(request, "application/json")
 	headers.SetUserAgent(request)
 }

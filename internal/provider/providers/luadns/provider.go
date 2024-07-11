@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"regexp"
 
 	"github.com/qdm12/ddns-updater/internal/models"
 	"github.com/qdm12/ddns-updater/internal/provider/constants"
@@ -19,15 +20,17 @@ import (
 )
 
 type Provider struct {
-	domain    string
-	host      string
-	ipVersion ipversion.IPVersion
-	email     string
-	token     string
+	domain     string
+	owner      string
+	ipVersion  ipversion.IPVersion
+	ipv6Suffix netip.Prefix
+	email      string
+	token      string
 }
 
-func New(data json.RawMessage, domain, host string,
-	ipVersion ipversion.IPVersion) (p *Provider, err error) {
+func New(data json.RawMessage, domain, owner string,
+	ipVersion ipversion.IPVersion, ipv6Suffix netip.Prefix) (
+	p *Provider, err error) {
 	extraSettings := struct {
 		Email string `json:"email"`
 		Token string `json:"token"`
@@ -36,44 +39,60 @@ func New(data json.RawMessage, domain, host string,
 	if err != nil {
 		return nil, err
 	}
-	p = &Provider{
-		domain:    domain,
-		host:      host,
-		ipVersion: ipVersion,
-		email:     extraSettings.Email,
-		token:     extraSettings.Token,
-	}
-	err = p.isValid()
+
+	err = validateSettings(domain, extraSettings.Email, extraSettings.Token)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("validating provider specific settings: %w", err)
 	}
-	return p, nil
+
+	return &Provider{
+		domain:     domain,
+		owner:      owner,
+		ipVersion:  ipVersion,
+		ipv6Suffix: ipv6Suffix,
+		email:      extraSettings.Email,
+		token:      extraSettings.Token,
+	}, nil
 }
 
-func (p *Provider) isValid() error {
+var (
+	regexEmail = regexp.MustCompile(`[a-zA-Z0-9-_.+]+@[a-zA-Z0-9-_.]+\.[a-zA-Z]{2,10}`)
+)
+
+func validateSettings(domain, email, token string) (err error) {
+	err = utils.CheckDomain(domain)
+	if err != nil {
+		return fmt.Errorf("%w: %w", errors.ErrDomainNotValid, err)
+	}
+
 	switch {
-	case !utils.MatchEmail(p.email):
-		return fmt.Errorf("%w", errors.ErrMalformedEmail)
-	case p.token == "":
-		return fmt.Errorf("%w", errors.ErrEmptyToken)
+	case !regexEmail.MatchString(email):
+		return fmt.Errorf("%w: email %q does not match regex %s",
+			errors.ErrEmailNotValid, email, regexEmail)
+	case token == "":
+		return fmt.Errorf("%w", errors.ErrTokenNotSet)
 	}
 	return nil
 }
 
 func (p *Provider) String() string {
-	return utils.ToString(p.domain, p.host, constants.LuaDNS, p.ipVersion)
+	return utils.ToString(p.domain, p.owner, constants.LuaDNS, p.ipVersion)
 }
 
 func (p *Provider) Domain() string {
 	return p.domain
 }
 
-func (p *Provider) Host() string {
-	return p.host
+func (p *Provider) Owner() string {
+	return p.owner
 }
 
 func (p *Provider) IPVersion() ipversion.IPVersion {
 	return p.ipVersion
+}
+
+func (p *Provider) IPv6Suffix() netip.Prefix {
+	return p.ipv6Suffix
 }
 
 func (p *Provider) Proxied() bool {
@@ -81,19 +100,19 @@ func (p *Provider) Proxied() bool {
 }
 
 func (p *Provider) BuildDomainName() string {
-	return utils.BuildDomainName(p.host, p.domain)
+	return utils.BuildDomainName(p.owner, p.domain)
 }
 
 func (p *Provider) HTML() models.HTMLRow {
 	return models.HTMLRow{
-		Domain:    models.HTML(fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName())),
-		Host:      models.HTML(p.Host()),
+		Domain:    fmt.Sprintf("<a href=\"http://%s\">%s</a>", p.BuildDomainName(), p.BuildDomainName()),
+		Owner:     p.Owner(),
 		Provider:  "<a href=\"https://www.luadns.com/\">LuaDNS</a>",
-		IPVersion: models.HTML(p.ipVersion.String()),
+		IPVersion: p.ipVersion.String(),
 	}
 }
 
-func (p *Provider) setHeaders(request *http.Request) {
+func setHeaders(request *http.Request) {
 	headers.SetUserAgent(request)
 	headers.SetAccept(request, "application/json")
 }
@@ -102,19 +121,19 @@ func (p *Provider) setHeaders(request *http.Request) {
 func (p *Provider) Update(ctx context.Context, client *http.Client, ip netip.Addr) (newIP netip.Addr, err error) {
 	zoneID, err := p.getZoneID(ctx, client)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrGetZoneID, err)
+		return netip.Addr{}, fmt.Errorf("getting zone id: %w", err)
 	}
 
 	record, err := p.getRecord(ctx, client, zoneID, ip)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrGetRecordInZone, err)
+		return netip.Addr{}, fmt.Errorf("getting record: %w", err)
 	}
 
 	newRecord := record
 	newRecord.Content = ip.String()
 	err = p.updateRecord(ctx, client, zoneID, newRecord)
 	if err != nil {
-		return netip.Addr{}, fmt.Errorf("%w: %w", errors.ErrUpdateRecord, err)
+		return netip.Addr{}, fmt.Errorf("updating record: %w", err)
 	}
 	return ip, nil
 }
@@ -124,7 +143,7 @@ type luaDNSRecord struct {
 	Name    string `json:"name"`
 	Type    string `json:"type"`
 	Content string `json:"content"`
-	TTL     int    `json:"ttl"`
+	TTL     uint32 `json:"ttl"`
 }
 
 type luaDNSError struct {
@@ -142,24 +161,23 @@ func (p *Provider) getZoneID(ctx context.Context, client *http.Client) (zoneID i
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("creating http request: %w", err)
 	}
-	request.Header.Set("Accept", "application/json")
-	request.Header.Set("User-Agent", "DDNS-Updater quentin.mcgaw@gmaip.com")
+	setHeaders(request)
 
 	response, err := client.Do(request)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("doing http request: %w", err)
 	}
 	defer response.Body.Close()
 
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return 0, fmt.Errorf("reading response body: %w", err)
 	}
 
 	if response.StatusCode != http.StatusOK {
-		err = fmt.Errorf("%w: %d", errors.ErrBadHTTPStatus, response.StatusCode)
+		err = fmt.Errorf("%w: %d", errors.ErrHTTPStatusNotValid, response.StatusCode)
 		var errorObj luaDNSError
 		if jsonErr := json.Unmarshal(b, &errorObj); jsonErr != nil {
 			return 0, fmt.Errorf("%w: %s", err, utils.ToSingleLine(string(b)))
@@ -174,7 +192,7 @@ func (p *Provider) getZoneID(ctx context.Context, client *http.Client) (zoneID i
 
 	err = json.Unmarshal(b, &zones)
 	if err != nil {
-		return 0, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return 0, fmt.Errorf("json decoding response body: %w", err)
 	}
 	for _, zone := range zones {
 		if zone.Name == p.domain {
@@ -195,23 +213,23 @@ func (p *Provider) getRecord(ctx context.Context, client *http.Client, zoneID in
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return record, err
+		return record, fmt.Errorf("creating http request: %w", err)
 	}
-	p.setHeaders(request)
+	setHeaders(request)
 
 	response, err := client.Do(request)
 	if err != nil {
-		return record, err
+		return record, fmt.Errorf("doing http request: %w", err)
 	}
 	defer response.Body.Close()
 
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
-		return record, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return record, fmt.Errorf("reading response body: %w", err)
 	}
 
 	if response.StatusCode != http.StatusOK {
-		err = fmt.Errorf("%w: %d", errors.ErrBadHTTPStatus, response.StatusCode)
+		err = fmt.Errorf("%w: %d", errors.ErrHTTPStatusNotValid, response.StatusCode)
 		var errorObj luaDNSError
 		if jsonErr := json.Unmarshal(b, &errorObj); jsonErr != nil {
 			return record, fmt.Errorf("%w: %s", err, utils.ToSingleLine(string(b)))
@@ -223,13 +241,13 @@ func (p *Provider) getRecord(ctx context.Context, client *http.Client, zoneID in
 
 	err = json.Unmarshal(b, &records)
 	if err != nil {
-		return record, fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return record, fmt.Errorf("json decoding response body: %w", err)
 	}
 	recordType := constants.A
 	if ip.Is6() {
 		recordType = constants.AAAA
 	}
-	recordName := utils.BuildURLQueryHostname(p.host, p.domain) + "."
+	recordName := utils.BuildURLQueryHostname(p.owner, p.domain) + "."
 	for _, record := range records {
 		if record.Type == recordType && record.Name == recordName {
 			return record, nil
@@ -257,23 +275,24 @@ func (p *Provider) updateRecord(ctx context.Context, client *http.Client,
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), buffer)
 	if err != nil {
-		return err
+		return fmt.Errorf("creating http request: %w", err)
 	}
-	p.setHeaders(request)
+	setHeaders(request)
+	headers.SetContentType(request, "application/json")
 
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return fmt.Errorf("doing http request: %w", err)
 	}
 	defer response.Body.Close()
 
 	b, err := io.ReadAll(response.Body)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return fmt.Errorf("reading response body: %w", err)
 	}
 
 	if response.StatusCode != http.StatusOK {
-		err = fmt.Errorf("%w: %d", errors.ErrBadHTTPStatus, response.StatusCode)
+		err = fmt.Errorf("%w: %d", errors.ErrHTTPStatusNotValid, response.StatusCode)
 		var errorObj luaDNSError
 		if jsonErr := json.Unmarshal(b, &errorObj); jsonErr != nil {
 			return fmt.Errorf("%w: %s", err, utils.ToSingleLine(string(b)))
@@ -284,7 +303,7 @@ func (p *Provider) updateRecord(ctx context.Context, client *http.Client,
 
 	var updatedRecord luaDNSRecord
 	if jsonErr := json.Unmarshal(b, &updatedRecord); jsonErr != nil {
-		return fmt.Errorf("%w: %w", errors.ErrUnmarshalResponse, err)
+		return fmt.Errorf("json decoding response body: %w", err)
 	}
 
 	if updatedRecord.Content != newRecord.Content {

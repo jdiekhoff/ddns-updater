@@ -11,16 +11,18 @@ import (
 type Provider string
 
 const (
-	Ipinfo Provider = "ipinfo"
+	Ipinfo      Provider = "ipinfo"
+	IP2Location Provider = "ip2location"
 )
 
 func ListProviders() []Provider {
 	return []Provider{
 		Ipinfo,
+		IP2Location,
 	}
 }
 
-var ErrUnknownProvider = errors.New("unknown provider")
+var ErrUnknownProvider = errors.New("unknown public IP information provider")
 
 func ValidateProvider(provider Provider) error {
 	for _, possible := range ListProviders() {
@@ -35,10 +37,13 @@ type provider interface {
 	get(ctx context.Context, ip netip.Addr) (result Result, err error)
 }
 
-func newProvider(providerName Provider, client *http.Client) provider { //nolint:ireturn
+//nolint:ireturn
+func newProvider(providerName Provider, client *http.Client) provider {
 	switch providerName {
 	case Ipinfo:
 		return newIpinfo(client)
+	case IP2Location:
+		return newIP2Location(client)
 	default:
 		panic(fmt.Sprintf("provider %s not implemented", providerName))
 	}

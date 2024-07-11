@@ -3,13 +3,8 @@ package data
 import (
 	"fmt"
 
-	"github.com/qdm12/ddns-updater/internal/models"
 	"github.com/qdm12/ddns-updater/internal/records"
 )
-
-func (db *Database) GetEvents(domain, host string) (events []models.HistoryEvent, err error) {
-	return db.persistentDB.GetEvents(domain, host)
-}
 
 func (db *Database) Update(id uint, record records.Record) (err error) {
 	db.Lock()
@@ -24,7 +19,7 @@ func (db *Database) Update(id uint, record records.Record) (err error) {
 	if newCount > currentCount {
 		if err := db.persistentDB.StoreNewIP(
 			record.Provider.Domain(),
-			record.Provider.Host(),
+			record.Provider.Owner(),
 			record.History.GetCurrentIP(),
 			record.History.GetSuccessTime(),
 		); err != nil {
@@ -32,10 +27,4 @@ func (db *Database) Update(id uint, record records.Record) (err error) {
 		}
 	}
 	return nil
-}
-
-func (db *Database) Close() (err error) {
-	db.Lock() // ensure write operation finishes
-	defer db.Unlock()
-	return db.persistentDB.Close()
 }

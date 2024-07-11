@@ -7,9 +7,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strconv"
-
-	"github.com/qdm12/ddns-updater/internal/provider/errors"
 )
 
 func (p *Provider) updateRecord(ctx context.Context, client *http.Client,
@@ -17,7 +14,7 @@ func (p *Provider) updateRecord(ctx context.Context, client *http.Client,
 	u := url.URL{
 		Scheme: p.apiURL.Scheme,
 		Host:   p.apiURL.Host,
-		Path:   p.apiURL.Path + "/domain/zone/" + p.domain + "/record/" + strconv.Itoa(int(recordID)),
+		Path:   fmt.Sprintf("%s/domain/zone/%s/record/%d", p.apiURL.Path, p.domain, recordID),
 	}
 	putRecordsParams := struct {
 		Target string `json:"target"`
@@ -26,12 +23,12 @@ func (p *Provider) updateRecord(ctx context.Context, client *http.Client,
 	}
 	bodyBytes, err := json.Marshal(putRecordsParams)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrRequestMarshal, err)
+		return fmt.Errorf("json encoding request data: %w", err)
 	}
 
 	request, err := http.NewRequestWithContext(ctx, http.MethodPut, u.String(), bytes.NewBuffer(bodyBytes))
 	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrBadRequest, err)
+		return fmt.Errorf("creating http request: %w", err)
 	}
 	request.Header.Add("Content-Type", "application/json;charset=utf-8")
 	p.setHeaderCommon(request.Header)
@@ -39,7 +36,7 @@ func (p *Provider) updateRecord(ctx context.Context, client *http.Client,
 
 	response, err := client.Do(request)
 	if err != nil {
-		return fmt.Errorf("%w: %w", errors.ErrUnsuccessfulResponse, err)
+		return fmt.Errorf("doing http request: %w", err)
 	}
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
